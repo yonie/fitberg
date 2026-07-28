@@ -37,7 +37,7 @@ network calls except map tiles.
 Requires [Docker](https://docs.docker.com/get-started/get-docker/).
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/fitberg.git
+git clone https://github.com/yonie/fitberg.git
 cd fitberg
 cp .env.example .env
 mkdir -p data
