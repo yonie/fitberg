@@ -1,0 +1,40 @@
+services:
+  fitberg:
+    build: .
+    image: fitberg:latest
+    container_name: fitberg
+    restart: unless-stopped
+    ports:
+      - "8710:8710"
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever DATA_DIR is in .env.
+      #
+      # .env ships `DATA_DIR=./data`, which is right for a bare-metal run but wrong
+      # inside the container: it would resolve relative to /app (the read-only code
+      # directory) rather than the volume mounted below. `environment` takes
+      # precedence over `env_file`, so this pins it to the mount point.
+      DATA_DIR: /data
+    volumes:
+      # Everything durable. Back this up and you have lost nothing.
+      #
+      # The container runs as the `node` user (uid 1000). If ./data does not exist,
+      # Docker creates it owned by root and the app cannot write to it — so the
+      # directory is created with the right ownership before first start (see README).
+      - ./data:/data
+    # Lets the container reach an Ollama running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Optional: a local Ollama for the AI coach. Comment out if you already run one.
+  # On a Raspberry Pi, prefer a small model (llama3.2:3b, qwen3:4b).
+  ollama:
+    image: ollama/ollama:latest
+    container_name: fitberg-ollama
+    restart: unless-stopped
+    profiles: ["ai"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama

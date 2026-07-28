@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Run Fitberg (or any node command) inside a Node 24 container against the
+# working tree. Useful on hosts whose system Node predates the built-in
+# node:sqlite module — e.g. Raspberry Pi OS bookworm, which ships Node 20.
+#
+#   bin/dev                       # start the server on :8710
+#   bin/dev node server/cli.js status
+#   bin/dev bash                  # poke around
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IMAGE="node:24-bookworm-slim"
+
+# Server deps are pure JS, so the host's node_modules is safe to reuse in the
+# container. The optional native fallback is not needed there (node:sqlite wins).
+exec docker run --rm -it \
+  --name fitberg-dev \
+  -v "$ROOT":/app \
+  -w /app \
+  -p 8710:8710 \
+  -e DATA_DIR=/app/data \
+  -e HOST=0.0.0.0 \
+  --add-host host.docker.internal:host-gateway \
+  "$IMAGE" \
+  "${@:-node server/index.js}"
