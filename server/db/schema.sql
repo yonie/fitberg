@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS activities (
   name             TEXT,
   sport            TEXT    NOT NULL DEFAULT 'other',
   sub_sport        TEXT,
+  device           TEXT,                   -- what recorded it, when the file says
 
   start_time       INTEGER NOT NULL,       -- epoch ms, UTC
   utc_offset_s     INTEGER NOT NULL DEFAULT 0,

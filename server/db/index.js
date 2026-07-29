@@ -66,6 +66,13 @@ const MIGRATIONS = [
           DROP TABLE IF EXISTS connector_apps;
           DROP TABLE IF EXISTS gear;`,
   },
+  {
+    // Both parsers already read what recorded an activity — FIT from its file-id
+    // message, TCX from Nike's `com.nike.devicename` tag — and until this column
+    // existed both were thrown away on the way to the database.
+    id: '2026-07-29-activity-device',
+    sql: 'ALTER TABLE activities ADD COLUMN device TEXT',
+  },
 ];
 
 /**

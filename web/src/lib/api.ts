@@ -108,6 +108,7 @@ export interface Activity {
 
 export interface ActivityDetail extends Activity {
   subSport: string | null;
+  device: string | null;
   elevLossM: number | null;
   elevMinM: number | null;
   elevMaxM: number | null;

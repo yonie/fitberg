@@ -50,7 +50,7 @@ export function Import() {
       <div className="page-head">
         <div>
           <h1>Import</h1>
-          <p>Drop FIT files in. Fitberg identifies them by reading them, not by their names.</p>
+          <p>Drop FIT or TCX files in. Fitberg identifies them by reading them, not by their names.</p>
         </div>
       </div>
 
@@ -151,7 +151,7 @@ function ImportBox({ onFiles }: { onFiles: (files: FileReport[]) => void }) {
         </ul>
       )}
 
-      <DropZone label="Drop your export ZIP or FIT files here" onImported={onFiles} big />
+      <DropZone label="Drop your export ZIP, FIT or TCX files here" onImported={onFiles} big />
 
       <p className="card-sub" style={{ marginTop: '0.75rem' }}>
         Unzipping is not necessary, and neither is sorting anything first. Importing the same

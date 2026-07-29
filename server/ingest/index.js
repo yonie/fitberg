@@ -5,6 +5,7 @@ import { sniff, KINDS } from './sniff.js';
 import { zipEntries, gunzip, readHead } from './archive.js';
 import { putBuffer } from '../lib/blobstore.js';
 import { parseFit } from '../parsers/fit.js';
+import { parseTcx } from '../parsers/tcx.js';
 import { finalizeActivity, streamLength } from '../parsers/canonical.js';
 import {
   insertActivity, findDuplicate, mergeActivity, writeStreams, writeLaps,
@@ -14,14 +15,14 @@ import { applyEdits } from '../db/edits.js';
 
 // The ingest pipeline.
 //
-// One entry point, one format: FIT. Give it a single `.fit`, a `.fit.gz`, a whole
-// unopened Strava export ZIP, or a directory of files off a head unit — it recurses
-// through containers, identifies files by content rather than name, stores every
-// original byte-for-byte, and is idempotent. Importing the same data twice changes
-// nothing.
+// One entry point, two formats: FIT and TCX. Give it a single `.fit`, a `.fit.gz`, a
+// `.tcx` (Nike Run Club and others export these), a whole unopened export ZIP, or a
+// directory of files off a head unit — it recurses through containers, identifies
+// files by content rather than name, stores every original byte-for-byte, and is
+// idempotent. Importing the same data twice changes nothing.
 //
-// Anything that is not a FIT file is skipped with a reason saying what it actually
-// was, so a skip is never a silent loss.
+// Anything that is neither is skipped with a reason saying what it actually was, so a
+// skip is never a silent loss.
 
 const MAX_LOG_ENTRIES = 400;
 
@@ -123,6 +124,9 @@ export async function ingestBuffer(db, userId, buffer, opts = {}) {
       case KINDS.FIT:
         await handleFit(db, userId, buffer, filename, report, opts);
         break;
+      case KINDS.TCX:
+        await handleTcx(db, userId, buffer, filename, report, opts);
+        break;
       default:
         // A null reason means "export scaffolding, not an activity" — counted so the
         // numbers still add up, but not itemised.
@@ -169,6 +173,21 @@ async function handleFit(db, userId, buffer, filename, report, opts) {
   recordOriginal(db, stored, 'fit', opts.source || report.source, filename);
 
   const { activities, warnings } = parseFit(buffer, { source: report.source });
+  if (warnings?.length) report.warnings.push(...warnings.map((w) => `${filename}: ${w}`));
+
+  for (const act of activities) {
+    report.found++;
+    act.originalHash = stored.hash;
+    storeActivity(db, userId, act, report, { originalHash: stored.hash, filename });
+  }
+}
+
+/** Store the bytes, parse, persist. Mirrors {@link handleFit}. */
+async function handleTcx(db, userId, buffer, filename, report, opts) {
+  const stored = putBuffer(buffer, { ext: '.tcx' });
+  recordOriginal(db, stored, 'tcx', opts.source || report.source, filename);
+
+  const { activities, warnings } = parseTcx(buffer, { source: report.source });
   if (warnings?.length) report.warnings.push(...warnings.map((w) => `${filename}: ${w}`));
 
   for (const act of activities) {

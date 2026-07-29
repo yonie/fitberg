@@ -4,7 +4,7 @@ import { encodeStream, decodeStream, CHANNEL_NAMES, hasSignal } from '../lib/cod
 import { dedupeKey, dedupeKeyNeighbours, STREAM_CHANNELS } from '../parsers/canonical.js';
 
 const ACTIVITY_COLUMNS = [
-  'source', 'source_id', 'dedupe_key', 'name', 'sport', 'sub_sport',
+  'source', 'source_id', 'dedupe_key', 'name', 'sport', 'sub_sport', 'device',
   'start_time', 'utc_offset_s', 'timezone',
   'elapsed_s', 'moving_s', 'distance_m', 'elev_gain_m', 'elev_loss_m', 'elev_min_m', 'elev_max_m',
   'avg_speed_ms', 'max_speed_ms', 'avg_hr', 'max_hr', 'avg_cadence', 'max_cadence',
@@ -26,6 +26,7 @@ function toRow(act) {
     name: act.name ?? null,
     sport: act.sport || 'other',
     sub_sport: act.subSport ?? null,
+    device: act.device ?? null,
     start_time: act.startTime,
     utc_offset_s: act.utcOffsetS || 0,
     timezone: act.timezone ?? null,

@@ -8,6 +8,7 @@ import { reindex, rebuildLedger } from './ingest/reindex.js';
 import { ingestPath } from './ingest/index.js';
 import { verifyStore, storeStats } from './lib/blobstore.js';
 import { recomputeAll, getProfile } from './metrics/engine.js';
+import { userCount, createUser } from './lib/auth.js';
 
 // Command-line tools. These exist because the operations that matter most for
 // data safety — reindex, verify, import — should not require a working browser

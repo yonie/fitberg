@@ -1,17 +1,18 @@
 // Content sniffing.
 //
-// Fitberg reads FIT files. Identification is by CONTENT, never by filename, which is
-// deliberate: Strava names activity files `1234567890.fit.gz`, browsers append "(1)",
-// Windows hides extensions, and people rename things. A FIT file is a FIT file
-// whatever it is called.
+// Fitberg reads FIT and TCX files. Identification is by CONTENT, never by filename,
+// which is deliberate: Strava names activity files `1234567890.fit.gz`, browsers
+// append "(1)", Windows hides extensions, and people rename things. A FIT file is a
+// FIT file whatever it is called.
 //
-// Only three things need recognising: a FIT file, and the two containers FIT files
-// arrive inside — a gzip member, or a ZIP archive full of them.
+// What needs recognising: a FIT file, a TCX file, and the two containers they arrive
+// inside — a gzip member, or a ZIP archive full of them.
 
 export const KINDS = {
   ZIP: 'zip',
   GZIP: 'gzip',
   FIT: 'fit',
+  TCX: 'tcx',
   UNKNOWN: 'unknown',
 };
 
@@ -35,6 +36,10 @@ export function sniff(head, filename = '') {
     return { kind: KINDS.FIT, reason: 'FIT file' };
   }
 
+  const text = head.toString('utf8').replace(/^﻿/, '').trimStart();
+  if (text.startsWith('<') && (/TrainingCenterDatabase/i.test(text) || /<Trackpoint\b/i.test(text))) {
+    return { kind: KINDS.TCX, reason: 'TCX file' };
+  }
 
   return { kind: KINDS.UNKNOWN, reason: describeUnsupported(head, filename) };
 }
@@ -56,10 +61,10 @@ function describeUnsupported(head, filename) {
   if (/\.(csv|json|txt|html?|pdf|xlsx?|md|png|jpe?g|gif|webp|heic)$/i.test(filename)) return null;
 
   if (text.startsWith('<')) {
-    // These three *are* activity recordings, in a format Fitberg does not store. Worth
-    // naming, because the count tells you whether anything you cared about was missed.
+    // GPX *is* an activity recording, in a format Fitberg does not store. Worth naming,
+    // because the count tells you whether anything you cared about was missed. TCX is
+    // handled above — it is no longer unsupported.
     if (/<\s*gpx/i.test(text) || /<trkpt\b/i.test(text)) return 'GPX file';
-    if (/TrainingCenterDatabase/i.test(text) || /<Trackpoint\b/i.test(text)) return 'TCX file';
     return null;
   }
 

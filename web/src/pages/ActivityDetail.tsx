@@ -246,7 +246,10 @@ export function ActivityDetail({ config }: { config: AppConfig }) {
             <Metric label="Normalized power" value={number(a.normalizedPower, 0)} unit="W"
               hint="A 30-second rolling average raised to the fourth power — surging costs more than steady riding." />
           ) : null}
-          {a.avgCadence ? <Metric label="Cadence" value={number(a.avgCadence, 0)} /> : null}
+          {a.avgCadence ? (
+            <Metric label="Cadence" value={number(a.avgCadence, 0)}
+              unit={/run|walk|hike/.test(a.sport) ? 'spm' : 'rpm'} />
+          ) : null}
           {a.calories ? <Metric label="Calories" value={number(a.calories, 0)} /> : null}
           {a.load ? (
             <Metric label="Training load" value={number(a.load, 0)}
@@ -389,6 +392,7 @@ export function ActivityDetail({ config }: { config: AppConfig }) {
       <Card title="Provenance" sub="Where this activity came from and what it was built from">
         <div className="grid grid-3" style={{ gap: '0.875rem' }}>
           <Metric label="Source" value={a.source} />
+          {a.device && <Metric label="Recorded on" value={a.device} />}
           {a.original && <Metric label="Original file" value={a.original.name || a.original.kind} />}
           {a.original && <Metric label="Size" value={bytes(a.original.bytes)} />}
           <Metric label="Channels stored" value={a.streamChannels.length} />

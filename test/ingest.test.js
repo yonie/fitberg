@@ -18,7 +18,7 @@ process.env.DATA_DIR = DATA_DIR;
 process.env.INBOX_POLL_SECONDS = '0';
 process.env.OLLAMA_ENABLED = '0';
 
-const { syntheticRun, makeFit, BASE_TIME } = await import('./fixtures.js');
+const { syntheticRun, makeFit, makeTcx, BASE_TIME } = await import('./fixtures.js');
 const { makeZip, gzip } = await import('./zipwriter.js');
 
 const { getDb, truncateDerived } = await import('../server/db/index.js');
@@ -75,6 +75,64 @@ test('ingest: a whole unopened Strava export ZIP', async () => {
 
   const streamCount = db.prepare('SELECT COUNT(*) c FROM streams WHERE activity_id = ?').get(rows[0].id).c;
   assert.ok(streamCount >= 6, `expected several stream channels, got ${streamCount}`);
+});
+
+/** A ZIP shaped like a real Nike export: a tcx/ folder of runs, plus the export PDF. */
+function nikeExportZip() {
+  const second = syntheticRun({ n: 300, speed: 2.6, startMs: BASE_TIME + 86400000 });
+  return makeZip([
+    { name: 'tcx/00024415-0e80-4e97-a08b-845e30c017dc.tcx',
+      data: makeTcx(samples, { distance: 'delta', eventDriven: true,
+        nikeTags: { 'com.nike.name': 'Utreg Trail Run', 'com.nike.devicename': 'COROS PACE 3', rpe: '7', terrain: 'trail' } }) },
+    { name: 'tcx/0628d536-3efe-4a48-a8db-994e42796e59.tcx',
+      data: makeTcx(second, { distance: 'delta', eventDriven: true }) },
+    // Nike ships a PDF of the whole account alongside the activity files.
+    { name: 'export.pdf', data: Buffer.from('%PDF-1.4 not really a pdf') },
+  ]);
+}
+
+test('ingest: a whole unopened Nike export ZIP of TCX files', async () => {
+  reset();
+  const zipPath = path.join(DATA_DIR, 'nikeuserdata.zip');
+  fs.writeFileSync(zipPath, nikeExportZip());
+
+  const report = await ingestPath(db, USER, zipPath, { filename: 'nikeuserdata.zip' });
+
+  assert.equal(report.imported, 2, `imported ${report.imported}: ${JSON.stringify(report.log, null, 1)}`);
+  assert.equal(report.failed, 0);
+
+  const rows = db.prepare('SELECT * FROM activities WHERE user_id = ? ORDER BY start_time').all(USER);
+  assert.equal(rows.length, 2);
+
+  // Nike's own extension is the only place a title, device or RPE exists in a TCX, so
+  // an import that ignored it would produce activities named "Morning Run" with no
+  // device and no RPE — strictly worse than the file it came from.
+  assert.equal(rows[0].name, 'Utreg Trail Run');
+  assert.equal(rows[0].device, 'COROS PACE 3');
+  assert.equal(rows[0].perceived_exertion, 7);
+  assert.equal(rows[0].sport, 'trail_run');
+
+  const streamCount = db.prepare('SELECT COUNT(*) c FROM streams WHERE activity_id = ?').get(rows[0].id).c;
+  assert.ok(streamCount >= 6, `expected several stream channels, got ${streamCount}`);
+});
+
+test('ingest: the same run from a FIT file and a Nike TCX stays one activity', async () => {
+  reset();
+  // The whole point of matching on what an activity physically is: a Nike export and
+  // the watch's own FIT of the same session must not become two runs in the log.
+  await ingestBuffer(db, USER, makeFit(samples), { filename: 'watch.fit', recomputeMetrics: false });
+  await ingestBuffer(db, USER, makeTcx(samples, { distance: 'delta' }), {
+    filename: 'nike.tcx', recomputeMetrics: false,
+  });
+
+  const rows = db.prepare('SELECT * FROM activities WHERE user_id = ?').all(USER);
+  assert.equal(rows.length, 1, 'one physical session must not become two activities');
+});
+
+test('ingest: a TCX is identified by content, not by its extension', async () => {
+  reset();
+  const report = await ingestBuffer(db, USER, makeTcx(samples), { filename: 'no-extension' });
+  assert.equal(report.imported, 1, JSON.stringify(report.toJSON().log));
 });
 
 test('ingest: unimported activities are reported, scaffolding is not', async () => {

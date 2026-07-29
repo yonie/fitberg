@@ -11,9 +11,10 @@ network calls except map tiles.
 
 ## Features
 
-- **Import** — loose `.fit` files, `.fit.gz`, a folder from a device, or an unopened export
-  ZIP from another platform. Archives are searched recursively; files are identified by
-  content, not extension. Re-importing the same data is a no-op.
+- **Import** — loose `.fit` files, `.fit.gz`, `.tcx` (Nike Run Club and others), a folder
+  from a device, or an unopened export ZIP from another platform. Archives are searched
+  recursively; files are identified by content, not extension. Re-importing the same
+  data is a no-op.
 - **Training load** from power, heart rate or grade-adjusted pace, whichever the file
   supports, on one scale where an hour at threshold is 100.
 - **Fitness and form** — Banister impulse-response: 42-day fitness, 7-day fatigue, form as

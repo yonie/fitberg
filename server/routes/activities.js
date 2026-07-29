@@ -80,6 +80,8 @@ export function registerActivityRoutes(app, { db }) {
       aerobicPct: row.aerobic_pct,
       notes: row.notes,
       feeling: row.feeling,
+      device: row.device,
+      subSport: row.sub_sport,
       // The crop currently in force, so the editor opens where you left it.
       cropStartS: row.crop_start_s,
       cropEndS: row.crop_end_s,

@@ -18,7 +18,7 @@
     "fitberg": "node server/cli.js",
     "reindex": "node server/cli.js reindex",
     "seed": "node test/seed.js",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@fastify/multipart": "^9.0.3",

@@ -135,6 +135,8 @@ export function makeFit(samples, {
     totalDistance,
     avgHeartRate: summary.avgHeartRate,
     maxHeartRate: summary.maxHeartRate,
+    avgCadence: summary.avgCadence,
+    maxCadence: summary.maxCadence,
   });
 
   if (withSession) {
@@ -167,4 +169,108 @@ export function makeFit(samples, {
   });
 
   return Buffer.from(encoder.close());
+}
+
+/**
+ * A TCX buffer, hand-built rather than pulled from a library — this is the shape
+ * Nike Run Club (and Garmin Connect, and most others) actually write: a single Lap
+ * wrapping a Track of Trackpoints, speed/power tucked into a `TPX` extension, and
+ * optionally Nike's own flat Key/Value `nax:Tag` block for device name, RPE, notes,
+ * terrain and the rest of what the base TCX schema has no field for.
+ *
+ * Two options reproduce the ways real producers disagree, because both are things the
+ * parser has to detect rather than assume:
+ *
+ *   `distance: 'delta'`  — Nike writes each Trackpoint's DistanceMeters as the distance
+ *     since the previous point. Garmin (and the schema) make it cumulative, which is the
+ *     default here.
+ *   `eventDriven: true`  — Nike emits a Trackpoint whenever any one sensor has news,
+ *     carrying only that sensor's value, so position and heart rate land on separate
+ *     points and some carry nothing but a timestamp.
+ *
+ * @param {object} [nikeTags] Key/Value pairs written verbatim into `nax:Tag`.
+ */
+export function makeTcx(samples, {
+  sport = 'Running', calories = 300, nikeTags = null, activityType = null,
+  distance = 'cumulative', eventDriven = false, producerNote = null,
+} = {}) {
+  const start = samples[0].timestamp;
+  const totalDistance = samples[samples.length - 1].dist;
+  const elapsed = (samples[samples.length - 1].timestamp.getTime() - start.getTime()) / 1000;
+
+  // Which channels a given sample is allowed to report. Dense files report everything on
+  // every point; an event-driven one rotates, so each channel appears every 4th second.
+  const reports = (s, i, channel) => {
+    if (!eventDriven) return true;
+    const slot = i % 4;
+    if (channel === 'pos' || channel === 'alt') return slot === 0;
+    if (channel === 'dist' || channel === 'speed') return slot === 1;
+    if (channel === 'hr') return slot === 2;
+    if (channel === 'cad') return slot === 3;
+    return true;
+  };
+
+  const trackpoints = samples.map((s, i) => {
+    const parts = [`<Time>${s.timestamp.toISOString()}</Time>`];
+    if (Number.isFinite(s.lat) && Number.isFinite(s.lng) && reports(s, i, 'pos')) {
+      parts.push(`<Position><LatitudeDegrees>${s.lat}</LatitudeDegrees>`
+        + `<LongitudeDegrees>${s.lng}</LongitudeDegrees></Position>`);
+    }
+    if (Number.isFinite(s.alt) && reports(s, i, 'alt')) {
+      parts.push(`<AltitudeMeters>${s.alt}</AltitudeMeters>`);
+    }
+    if (Number.isFinite(s.dist) && reports(s, i, 'dist')) {
+      // A delta-style file reports the gap since the previous point, so the first one
+      // carries the distance covered up to it rather than zero.
+      const value = distance === 'delta' ? s.dist - (i > 0 ? samples[i - 1].dist : 0) : s.dist;
+      parts.push(`<DistanceMeters>${value}</DistanceMeters>`);
+    }
+    if (Number.isFinite(s.hr) && reports(s, i, 'hr')) {
+      parts.push(`<HeartRateBpm><Value>${s.hr}</Value></HeartRateBpm>`);
+    }
+    if (Number.isFinite(s.cad) && reports(s, i, 'cad')) {
+      parts.push(`<Cadence>${s.cad}</Cadence>`);
+    }
+    if ((Number.isFinite(s.speed) || Number.isFinite(s.power)) && reports(s, i, 'speed')) {
+      const ext = [];
+      if (Number.isFinite(s.speed)) ext.push(`<ns3:Speed>${s.speed}</ns3:Speed>`);
+      if (Number.isFinite(s.power)) ext.push(`<ns3:Watts>${s.power}</ns3:Watts>`);
+      parts.push('<Extensions><TPX xmlns="http://www.garmin.com/xmlschemas/ActivityExtension/v2">'
+        + `${ext.join('')}</TPX></Extensions>`);
+    }
+    return `<Trackpoint>${parts.join('')}</Trackpoint>`;
+  }).join('');
+
+  // Real Nike files wrap every Key/Value pair for an activity in one shared <nax:Tag>,
+  // as flat repeated siblings rather than one Tag per pair, and name the sport a second
+  // time in <nax:ActivityType> — which is the only correct one when Sport="undefined".
+  const extXml = nikeTags || activityType
+    ? '<Extensions><nax:NAX>'
+      + (activityType ? `<nax:ActivityType>${activityType}</nax:ActivityType>` : '')
+      + (nikeTags
+        ? '<nax:Tags><nax:Tag>'
+          + Object.entries(nikeTags).map(([k, v]) => `<nax:Key>${k}</nax:Key><nax:Value>${v}</nax:Value>`).join('')
+          + '</nax:Tag></nax:Tags>'
+        : '')
+      + '</nax:NAX></Extensions>'
+    : '';
+
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
+    xmlns:ns3="http://www.garmin.com/xmlschemas/ActivityExtension/v2"
+    xmlns:nax="https://www.nike.com/xmlschemas/NikeActivityExtension/v1">
+<Activities><Activity Sport="${sport}">
+<Id>${start.toISOString()}</Id>
+<Lap StartTime="${start.toISOString()}">
+<TotalTimeSeconds>${elapsed}</TotalTimeSeconds>
+<DistanceMeters>${totalDistance}</DistanceMeters>
+<Calories>${calories}</Calories>
+<Track>${trackpoints}</Track>
+${producerNote ? `<Notes>${producerNote}</Notes>` : ''}
+</Lap>
+${extXml}
+</Activity></Activities>
+</TrainingCenterDatabase>`;
+
+  return Buffer.from(xml, 'utf8');
 }
