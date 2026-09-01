@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-  <!-- The nav logo (App.tsx), drawn with the palette's --series-1 spelled out:
-       an SVG loaded as a favicon gets no stylesheet, so the variable cannot
-       follow it here. The app is light-only by design, so one blue is enough. -->
+  <!-- The iceberg the nav draws in App.tsx. A favicon is fetched on its own,
+       with no stylesheet behind it, so the palette variable the component uses
+       cannot follow it here and the blue is written out. The palette is
+       light-only by design, so one value covers it. -->
   <path d="M12 2l7 9H5z" fill="#2a78d6"/>
   <path d="M5 11h14l3 5H2z" fill="#2a78d6" opacity=".55"/>
   <path d="M2 16h20l-2 6H4z" fill="#2a78d6" opacity=".3"/>
