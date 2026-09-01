@@ -235,6 +235,35 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 
+-- ─── integrations ─────────────────────────────────────────────────────────────
+-- One row per connected upstream account (today: COROS). USER-AUTHORED in the
+-- sense that only the user can create it, but every field here is machinery:
+-- credentials and sync bookkeeping. Not derived, never rebuilt by reindex.
+CREATE TABLE IF NOT EXISTS integration_accounts (
+  id            INTEGER PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider      TEXT    NOT NULL,             -- 'coros'
+  -- OAuth client registered with the provider at first connect (dynamic client
+  -- registration). Fitberg ships no shared client_id of its own.
+  client_id     TEXT    NOT NULL,
+  client_secret TEXT,                        -- null for public clients (PKCE)
+  -- Token state. access tokens are short-lived; the refresh token is the durable
+  -- credential. stored server-side only, never sent to the browser.
+  access_token  TEXT,
+  refresh_token TEXT,
+  token_expires_at INTEGER,                   -- epoch ms
+  -- Who we are talking to, as reported by the provider at connect time.
+  account_name  TEXT,
+  -- Sync bookkeeping.
+  last_sync_at  INTEGER,                      -- epoch ms, last successful sync
+  last_sync_status_json TEXT,                 -- verbatim last sync report
+  last_synced_activity_ms INTEGER,            -- provider max activity start time seen
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  UNIQUE (user_id, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_integrations_user ON integration_accounts(user_id);
+
 CREATE TABLE IF NOT EXISTS ai_insights (
   id         INTEGER PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

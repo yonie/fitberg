@@ -60,6 +60,17 @@ export const config = {
     model: process.env.OLLAMA_MODEL || 'qwen3.5',
   },
 
+  coros: {
+    // The official COROS MCP server. Overridable for tests and for the regional
+    // standalone URLs (mcpeu/mcpus/mcpcn.coros.com) if the redirecting main URL
+    // ever misbehaves.
+    mcpUrl: process.env.COROS_MCP_URL || 'https://mcp.coros.com/mcp',
+    // On by default, but it only does anything once an account is connected —
+    // and connecting is the user's explicit choice. Set COROS_AUTO_SYNC=0 to
+    // keep the connection and sync only when asked.
+    autoSync: bool(process.env.COROS_AUTO_SYNC, true),
+  },
+
   map: {
     styleUrl: process.env.MAP_STYLE_URL || '',
     terrainTileUrl:

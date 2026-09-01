@@ -5,7 +5,8 @@ derives training load, fitness and form, personal records, power curves, zones a
 of every route.
 
 Runs in Docker on a home server or a Raspberry Pi. No accounts, no cloud services, no
-network calls except map tiles.
+network calls except map tiles — and COROS sync if you turn it on, which talks to
+COROS's own official service on your behalf.
 
 ![Fitberg dashboard](docs/screenshots/dashboard.png)
 
@@ -15,6 +16,13 @@ network calls except map tiles.
   from a device, or an unopened export ZIP from another platform. Archives are searched
   recursively; files are identified by content, not extension. Re-importing the same
   data is a no-op.
+- **COROS sync** — connect your COROS account once and Fitberg pulls new activities
+  through COROS's official MCP service: real FIT files, straight from their servers,
+  into the same pipeline as everything else. Runs about once a day while the server is
+  up, or on demand from the Import page. COROS caps downloads at 50 activity files
+  per day, so a first backfill of a long history takes a few days — it keeps going
+  by itself. Off unless you connect an account; disconnecting revokes Fitberg’s
+  access at COROS.
 - **Training load** from power, heart rate or grade-adjusted pace, whichever the file
   supports, on one scale where an hour at threshold is 100.
 - **Fitness and form** — Banister impulse-response: 42-day fitness, 7-day fatigue, form as

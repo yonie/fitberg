@@ -5,3 +5,8 @@ web/dist/
 *.log
 .DS_Store
 tmp/
+
+# Local ops notes with server details — not for the public repo
+docs/https-callback-plan.md
+.env.bak.*
+docs/coros-outreach.md

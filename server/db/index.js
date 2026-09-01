@@ -73,6 +73,14 @@ const MIGRATIONS = [
     id: '2026-07-29-activity-device',
     sql: 'ALTER TABLE activities ADD COLUMN device TEXT',
   },
+  {
+    // The integrations table for the COROS connector. schema.sql already creates
+    // it (CREATE TABLE IF NOT EXISTS), so fresh databases do not need this entry
+    // executed — but old ones re-apply schema.sql on startup, which is how they
+    // gain the table. Recorded for provenance.
+    id: '2026-08-30-integration-accounts',
+    sql: 'SELECT 1', // no-op; the table comes from schema.sql
+  },
 ];
 
 /**

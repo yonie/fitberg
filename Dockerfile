@@ -38,7 +38,9 @@ COPY --from=web   /build/web/dist     ./web/dist
 COPY server ./server
 # The demo seed is documented in the README as the way to look around before importing
 # anything, so it has to be in the image rather than only in a source checkout.
-COPY test/seed.js test/fixtures.js test/routes.js ./test/
+# All the test files come along — they are how `docker exec fitberg npm test` is
+# supposed to work, and a partial copy breaks the imports between test files.
+COPY test ./test
 COPY package.json ./
 
 USER node

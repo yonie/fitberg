@@ -1,14 +1,14 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useGet } from '../lib/hooks';
-import { Card, ErrorNotice } from '../components/common';
+import { Card, ErrorNotice, Loading } from '../components/common';
 import { relativeTime, number } from '../lib/format';
 
 // The import page.
 //
-// Connect a platform, press one button, get your history. Both Strava and Wahoo work
-// the same way — register the app once from this page (no config files, no restart),
-// authorise over OAuth, then pull everything.
+// Connect a platform, press one button, get your history. COROS works over the
+// official COROS MCP service — register once from this page (no config files, no
+// restart), authorise over OAuth, then pull everything.
 //
 // Everything else (device over USB, watched folder, push API) is a file landing in the
 // same pipeline, so it gets less space.
@@ -53,6 +53,8 @@ export function Import() {
           <p>Drop FIT or TCX files in. Fitberg identifies them by reading them, not by their names.</p>
         </div>
       </div>
+
+      <CorosCard onSyncDone={() => history.reload()} />
 
       <div ref={resultRef} />
       {reports.length > 0 && <ImportResult reports={reports} />}
@@ -112,6 +114,207 @@ const SOURCES = [
       + 'there is no waiting.',
   },
 ];
+
+// ─── COROS connector ──────────────────────────────────────────────────────────
+
+interface CorosStatus {
+  connected: boolean;
+  accountName?: string | null;
+  lastSyncAt?: number | null;
+  lastSync?: {
+    found?: number; downloaded?: number; imported?: number; merged?: number;
+    duplicates?: number; failed?: number; quotaExhausted?: boolean; quotaUsed?: number;
+    deferred?: number; alreadyHave?: number;
+  } | null;
+  autoSync?: boolean;
+}
+
+/**
+ * The COROS card: connect once, then Sync now (or wait for the daily
+ * background sync). The 50-FIT-a-day quota is COROS's, so backfilling a long
+ * history takes a few days — the card says so rather than leaving the user to
+ * wonder why it stopped at fifty.
+ */
+function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
+  const status = useGet<CorosStatus>('/api/integrations/coros');
+  const [busy, setBusy] = useState<'connect' | 'sync' | 'disconnect' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pasted, setPasted] = useState('');
+  const [awaitingPaste, setAwaitingPaste] = useState(false);
+  const [pasteDone, setPasteDone] = useState<string | null>(null);
+
+  // The connect finishes in another tab; refresh this card when the user comes
+  // back, rather than making them reload.
+  useEffect(() => {
+    const onFocus = () => { if (!status.data?.connected) status.reload(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status.data?.connected]);
+
+  const connect = async () => {
+    setBusy('connect');
+    setError(null);
+    setPasteDone(null);
+    try {
+      const res = await api.post<{ url: string; manual: boolean }>('/api/integrations/coros/connect', {});
+      // The OAuth flow happens in a separate tab. With an https PUBLIC_URL the
+      // browser lands back on Fitberg by itself; otherwise COROS's own page
+      // shows a code after login, which the user types into the field below.
+      window.open(res.url, '_blank', 'noopener');
+      setAwaitingPaste(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const completePaste = async () => {
+    setBusy('connect');
+    setError(null);
+    try {
+      await api.post('/api/integrations/coros/complete', { code: pasted });
+      setPasteDone('Connected.');
+      setAwaitingPaste(false);
+      setPasted('');
+      status.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not complete');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const sync = async () => {
+    setBusy('sync');
+    setError(null);
+    try {
+      const res = await api.post<{ report: NonNullable<CorosStatus['lastSync']> }>(
+        '/api/integrations/coros/sync', {},
+      );
+      status.reload();
+      onSyncDone();
+      if (res.report?.quotaExhausted) {
+        setError(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setBusy(null);
+      status.reload();
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy('disconnect');
+    try {
+      await api.post('/api/integrations/coros/disconnect', {});
+      status.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not disconnect');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const last = status.data?.lastSync;
+  const sub = status.data?.connected
+    ? (status.data.accountName ? `Connected — ${status.data.accountName}` : 'Connected')
+    : 'Not connected';
+
+  return (
+    <Card
+      title="COROS"
+      sub={sub}
+      style={{ marginBottom: '1rem' }}
+    >
+      {status.loading ? <Loading /> : status.data?.connected ? (
+        <>
+          {last && (
+            <div className="card-sub" style={{ marginBottom: '0.75rem' }}>
+              Last sync {status.data.lastSyncAt ? relativeTime(status.data.lastSyncAt) : '—'}:
+              {' '}{last.imported ?? 0} new, {last.merged ?? 0} merged,
+              {' '}{last.duplicates ?? 0} already present
+              {last.alreadyHave ? ` · ${last.alreadyHave} already in your library` : ''}
+              {last.quotaUsed ? ` · ${last.quotaUsed}/50 downloads today` : ''}
+              {last.quotaExhausted
+                ? ` · daily quota reached, ${last.deferred ?? 0} still to come tomorrow`
+                : ''}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <button
+              type="button" className="btn btn-primary"
+              disabled={busy !== null} onClick={sync}
+            >
+              {busy === 'sync' ? <span className="spinner" /> : 'Sync now'}
+            </button>
+            <button
+              type="button" className="btn"
+              disabled={busy !== null} onClick={disconnect}
+            >
+              Disconnect
+            </button>
+          </div>
+
+          <p className="card-sub" style={{ marginTop: '0.75rem' }}>
+            Fitberg also syncs COROS automatically about once a day while it runs.
+            COROS caps downloads at 50 activity files a day, so a first backfill
+            of a long history takes a few days — it keeps going by itself.
+            Every sync re-checks your whole COROS history, so nothing can be
+            left behind and there is never anything to reset.
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="card-sub" style={{ margin: '0 0 0.75rem' }}>
+            Connect your COROS account through COROS's official MCP service to pull
+            new activities automatically — FIT files, straight from the source.
+          </p>
+          {awaitingPaste && (
+            <div className="notice" style={{ marginBottom: '0.875rem' }}>
+              <span className="notice-icon" aria-hidden="true">i</span>
+              <div style={{ display: 'grid', gap: '0.5rem' }}>
+                <span>
+                  Almost there — two steps in the tab that just opened:
+                </span>
+                <ol style={{ margin: 0, paddingLeft: '1.25rem', display: 'grid', gap: '0.25rem' }}>
+                  <li>Log in to COROS and approve the connection.</li>
+                  <li>You land back on COROS's website. <strong>Copy the web
+                      address</strong> (Ctrl+L, then Ctrl+C) and paste it below.</li>
+                </ol>
+                <div style={{ display: 'flex', gap: '0.5rem', maxWidth: '34rem' }}>
+                  <input
+                    type="text" value={pasted} spellCheck={false}
+                    placeholder="Paste the address you landed on"
+                    onChange={(e) => setPasted(e.target.value)}
+                    style={{ flex: 1, minWidth: 0, fontFamily: 'var(--mono)', fontSize: '0.8125rem' }}
+                  />
+                  <button
+                    type="button" className="btn btn-sm" disabled={!pasted || busy !== null}
+                    onClick={completePaste}
+                  >
+                    Finish
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          <button
+            type="button" className="btn btn-primary"
+            disabled={busy !== null} onClick={connect}
+          >
+            {busy === 'connect' ? <span className="spinner" /> : 'Connect COROS'}
+          </button>
+          {pasteDone && <span className="card-sub" style={{ marginLeft: '0.75rem' }}>{pasteDone}</span>}
+        </>
+      )}
+      {error && <div style={{ marginTop: '0.75rem' }}><ErrorNotice error={error} /></div>}
+    </Card>
+  );
+}
 
 /**
  * One box for everything.

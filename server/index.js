@@ -19,7 +19,9 @@ import { registerImportRoutes } from './routes/imports.js';
 import { registerProfileRoutes } from './routes/profile.js';
 import { registerAiRoutes } from './routes/ai.js';
 import { registerExportRoutes } from './routes/export.js';
+import { registerCorosRoutes } from './routes/coros.js';
 
+import { startCorosScheduler } from './integrations/scheduler.js';
 import { ollamaStatus } from './ai/ollama.js';
 
 // Endpoints reachable without a session. Everything else requires one.
@@ -156,6 +158,7 @@ export async function buildServer() {
   registerImportRoutes(app, { db });
   registerAiRoutes(app, { db });
   registerExportRoutes(app, { db });
+  registerCorosRoutes(app, { db });
 
   // ─── the web app ────────────────────────────────────────────────────────────
 
@@ -219,6 +222,7 @@ async function main() {
   }
 
   const stoppers = [];
+  stoppers.push(startCorosScheduler(db, { log: app.log }));
 
   const shutdown = async (signal) => {
     app.log.info(`${signal} received, shutting down`);
