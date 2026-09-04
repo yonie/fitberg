@@ -14,7 +14,7 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fitberg-crop-'));
 process.env.DATA_DIR = DATA_DIR;
 process.env.OLLAMA_ENABLED = '0';
 
-const { syntheticRun, makeFit } = await import('./fixtures.js');
+const { syntheticRun, makeFit, makeTcx } = await import('./fixtures.js');
 const { getDb } = await import('../server/db/index.js');
 const { ingestBuffer } = await import('../server/ingest/index.js');
 
@@ -94,6 +94,38 @@ test('crop: survives a reindex, and so do notes', async () => {
   );
   assert.equal(rebuilt.notes, 'stopped for coffee', 'notes must survive reindex');
   assert.equal(rebuilt.perceived_exertion, 4, 'RPE must survive reindex');
+});
+
+test('crop: a TCX-backed activity crops too, not just a FIT one', async () => {
+  // Over half a Nike Run Club import is TCX, and re-deriving the crop reads the original
+  // back off disk. Parsing that as FIT throws, which the caller could only report as
+  // "that crop would leave nothing" — so trimming was refused for every one of them.
+  const startMs = Date.UTC(2025, 5, 12, 18, 0, 0);
+  const samples = syntheticRun({ n: 1200, startMs });
+  const bytes = Buffer.from(makeTcx(samples, { sport: 'Running' }));
+
+  const report = await ingestBuffer(db, USER, bytes, {
+    filename: 'crop-me.tcx', recomputeMetrics: false,
+  });
+  const [id] = report.activityIds;
+  const before = db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+  assert.ok(before.distance_m > 3500, `expected ~3600 m, got ${before.distance_m}`);
+  assert.equal(
+    db.prepare('SELECT kind FROM originals WHERE hash = ?').get(before.original_hash).kind,
+    'tcx',
+  );
+
+  assert.equal(applyCrop(db, before, { crop_start_s: 0, crop_end_s: 600 }), true);
+
+  const after = db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+  assert.ok(Math.abs(after.distance_m - 1800) < 60, `expected ~1800 m, got ${after.distance_m}`);
+  assert.ok(after.elapsed_s <= 601, `expected ~600 s, got ${after.elapsed_s}`);
+  assert.equal(after.crop_end_s, 600);
+
+  // And it comes back off: clearing restores the whole recording.
+  assert.equal(applyCrop(db, after, { crop_start_s: null, crop_end_s: null }), true);
+  const restored = db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+  assert.ok(restored.distance_m > 3500, `expected ~3600 m back, got ${restored.distance_m}`);
 });
 
 test('crop: a window that would leave nothing is refused', () => {
