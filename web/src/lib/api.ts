@@ -126,6 +126,8 @@ export interface ActivityDetail extends Activity {
   feeling: number | null;
   cropStartS: number | null;
   cropEndS: number | null;
+  /** Length of the whole recording, crop or no crop — the range the trim editor spans. */
+  recordingElapsedS: number | null;
   bbox: { minLat: number; minLng: number; maxLat: number; maxLng: number } | null;
   laps: any[];
   streamChannels: { channel: string; n: number }[];

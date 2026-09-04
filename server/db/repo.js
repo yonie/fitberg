@@ -6,7 +6,8 @@ import { dedupeKey, dedupeKeyNeighbours, STREAM_CHANNELS } from '../parsers/cano
 const ACTIVITY_COLUMNS = [
   'source', 'source_id', 'dedupe_key', 'name', 'sport', 'sub_sport', 'device',
   'start_time', 'utc_offset_s', 'timezone',
-  'elapsed_s', 'moving_s', 'distance_m', 'elev_gain_m', 'elev_loss_m', 'elev_min_m', 'elev_max_m',
+  'elapsed_s', 'moving_s', 'recording_elapsed_s',
+  'distance_m', 'elev_gain_m', 'elev_loss_m', 'elev_min_m', 'elev_max_m',
   'avg_speed_ms', 'max_speed_ms', 'avg_hr', 'max_hr', 'avg_cadence', 'max_cadence',
   'avg_power', 'max_power', 'normalized_power', 'work_kj', 'calories', 'avg_temp_c',
   'trainer', 'commute', 'manual',
@@ -32,6 +33,9 @@ function toRow(act) {
     timezone: act.timezone ?? null,
     elapsed_s: intOrNull(act.elapsedS),
     moving_s: intOrNull(act.movingS),
+    // On import the activity is the whole recording, so the two agree; a crop later
+    // shortens elapsed_s and leaves this one alone.
+    recording_elapsed_s: intOrNull(act.recordingElapsedS ?? act.elapsedS),
     distance_m: numOrNull(act.distanceM),
     elev_gain_m: numOrNull(act.elevGainM),
     elev_loss_m: numOrNull(act.elevLossM),

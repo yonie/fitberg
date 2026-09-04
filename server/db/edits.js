@@ -121,27 +121,7 @@ export function applyEdits(db, userId) {
  * @returns {boolean} whether anything changed
  */
 export function applyCrop(db, activity, edit) {
-  if (!activity.original_hash) return false;
-
-  const original = db.prepare('SELECT rel_path FROM originals WHERE hash = ?')
-    .get(activity.original_hash);
-  if (!original) return false;
-
-  let fresh;
-  try {
-    const buffer = readFileSync(absPathFor(original.rel_path));
-    // Re-parse with whatever reads this file, sniffed from the bytes for the same reason
-    // ingest does it that way. Assuming FIT here made every TCX-backed activity — a Nike
-    // Run Club export, say — refuse to crop: the parser threw, and the throw looked from
-    // the outside exactly like a crop that would leave nothing.
-    const parsed = parserFor(buffer)(buffer, { source: activity.source || 'file' });
-    // A multisport file holds several activities; match on start time rather than
-    // assuming the first one.
-    fresh = parsed.activities.find((a) => Math.abs(a.startTime - activity.start_time) < 120000)
-      ?? parsed.activities[0];
-  } catch {
-    return false;
-  }
+  const fresh = readOriginalActivity(db, activity);
   if (!fresh) return false;
 
   // Clearing a crop must restore exactly what the device reported, so the full-recording
@@ -161,7 +141,7 @@ export function applyCrop(db, activity, edit) {
       avg_hr = ?, max_hr = ?, avg_power = ?, max_power = ?, normalized_power = ?,
       avg_cadence = ?, avg_speed_ms = ?, max_speed_ms = ?,
       calories = ?, work_kj = ?, polyline = ?,
-      crop_start_s = ?, crop_end_s = ?, updated_at = ?
+      crop_start_s = ?, crop_end_s = ?, recording_elapsed_s = ?, updated_at = ?
     WHERE id = ?`).run(
     cropped.elapsedS ?? null, cropped.movingS ?? null, cropped.distanceM ?? null,
     cropped.elevGainM ?? null, cropped.elevLossM ?? null,
@@ -173,7 +153,11 @@ export function applyCrop(db, activity, edit) {
     // Calories scale with the fraction of the activity kept; there is no better
     // estimate available once samples are gone.
     cropped.calories ?? null, cropped.workKj ?? null, cropped.polyline ?? null,
-    edit.crop_start_s ?? null, edit.crop_end_s ?? null, Date.now(),
+    edit.crop_start_s ?? null, edit.crop_end_s ?? null,
+    // elapsed_s above is now the CROPPED length. The whole recording's length has to be
+    // kept separately or the trim editor has no idea how much it is allowed to put back.
+    round(fresh.elapsedS) ?? activity.recording_elapsed_s ?? null,
+    Date.now(),
     activity.id,
   );
 
@@ -252,6 +236,37 @@ export function cropActivity(act, startS, endS) {
   finalizeActivity(next);
   if (streamLength(next.streams) < 2) return null;
   return next;
+}
+
+/**
+ * Re-read an activity from its original file, exactly as imported — no crop applied.
+ *
+ * This is what makes a crop reversible and re-editable: the file is the authority, so
+ * the full recording is always one parse away however many times it has been trimmed.
+ *
+ * @returns {object|null} the canonical activity, or null if the file cannot be read
+ */
+export function readOriginalActivity(db, activity) {
+  if (!activity.original_hash) return null;
+  const original = db.prepare('SELECT rel_path FROM originals WHERE hash = ?')
+    .get(activity.original_hash);
+  if (!original) return null;
+
+  try {
+    const buffer = readFileSync(absPathFor(original.rel_path));
+    // Pick the parser by content, the way ingest identifies a file. Assuming FIT here
+    // made every TCX-backed activity — a Nike Run Club export, say — refuse to crop: the
+    // parser threw, and from the outside the throw was indistinguishable from a crop that
+    // would leave nothing.
+    const parsed = parserFor(buffer)(buffer, { source: activity.source || 'file' });
+    // A multisport file holds several activities; match on start time rather than
+    // assuming the first one.
+    return parsed.activities.find((a) => Math.abs(a.startTime - activity.start_time) < 120000)
+      ?? parsed.activities[0]
+      ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**

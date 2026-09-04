@@ -98,6 +98,31 @@ export function StreamCharts({ streams, sport, onHoverIndex, followIndex }: {
     return time ?? dist ?? null;
   }, [axis, streams]);
 
+  // Where each sample sits on the x axis.
+  //
+  // A sample can be missing its x reading — a pause leaves a run of trackpoints with no
+  // distance on them — and there is no honest position for one. This used to fall back to
+  // the sample INDEX, which feeds an index into a scale whose domain is metres: a gap 1300
+  // samples into a 730 m activity landed the point at nearly twice the plot width, and
+  // `.chart` deliberately does not clip, so the line drew out across the page.
+  //
+  // Distance never goes backwards, so the last reading before a gap is where the athlete
+  // still was. Carrying it forward is both true and, unlike an index, always in domain.
+  const xAt = useMemo(() => {
+    if (!xValues) return [];
+    const out: number[] = new Array(xValues.length);
+    let last = NaN;
+    for (let i = 0; i < xValues.length; i++) {
+      const v = xValues[i];
+      if (v !== null && Number.isFinite(v)) last = v;
+      out[i] = last;
+    }
+    // A gap at the very start has nothing behind it, so it borrows the first real reading.
+    const first = out.find((v) => Number.isFinite(v)) ?? 0;
+    for (let i = 0; i < out.length && !Number.isFinite(out[i]); i++) out[i] = first;
+    return out;
+  }, [xValues]);
+
   if (!active.length || !xValues) {
     return <p className="card-sub">This activity has no detailed sample data.</p>;
   }
@@ -146,7 +171,7 @@ export function StreamCharts({ streams, sport, onHoverIndex, followIndex }: {
           const yTicks = niceTicks(yDomain[0], yDomain[1], 3);
 
           const points = values.map((v, i) => ({
-            x: x(xValues[i] ?? i),
+            x: x(xAt[i]),
             y: v === null || !Number.isFinite(v) ? null : y(v),
           }));
 
@@ -176,10 +201,10 @@ export function StreamCharts({ streams, sport, onHoverIndex, followIndex }: {
                     strokeWidth={panel.fill ? 1.5 : 2} strokeLinejoin="round"
                   />
 
-                  {hoverIndex !== null && <Crosshair x={x(xValues[hoverIndex] ?? 0)} y0={0} y1={innerHeight} />}
+                  {hoverIndex !== null && <Crosshair x={x(xAt[hoverIndex])} y0={0} y1={innerHeight} />}
                   {hoverIndex !== null && hoverValue !== null && Number.isFinite(hoverValue) && (
                     <circle
-                      cx={x(xValues[hoverIndex] ?? 0)} cy={y(hoverValue as number)} r={4}
+                      cx={x(xAt[hoverIndex])} cy={y(hoverValue as number)} r={4}
                       fill={panel.color} stroke="var(--surface-1)" strokeWidth={2}
                     />
                   )}
@@ -208,12 +233,12 @@ export function StreamCharts({ streams, sport, onHoverIndex, followIndex }: {
                     onMouseMove={(event) => {
                       const bounds = (event.target as SVGRectElement).getBoundingClientRect();
                       const target = x.invert(event.clientX - bounds.left);
-                      const index = nearestIndex(xValues, target);
+                      const index = nearestIndex(xAt, target);
                       setHover(index);
                       show(event, (
                         <>
                           <div className="tooltip-title">
-                            {xLabel(xValues[index] ?? 0)}
+                            {xLabel(xAt[index])}
                             {axis === 'distance' && streams.channels.t
                               ? ` · ${duration(streams.channels.t[index] ?? 0, 'clock')}`
                               : ''}

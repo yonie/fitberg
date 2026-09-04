@@ -1,7 +1,7 @@
 import { readStreams, readStreamRows } from '../db/repo.js';
 import { decodeStream } from '../lib/codec.js';
 import { getProfile, recomputeActivity, recomputeDaily } from '../metrics/engine.js';
-import { saveEdit, applyCrop } from '../db/edits.js';
+import { saveEdit, applyCrop, readOriginalActivity } from '../db/edits.js';
 import { prettySport, SPORTS } from '../parsers/sports.js';
 import { readOriginal } from '../lib/blobstore.js';
 import { shapeActivity, ACTIVITY_SELECT } from './shape.js';
@@ -51,6 +51,18 @@ export function registerActivityRoutes(app, { db }) {
     const row = getOwned(db, request.userId, request.params.id);
     if (!row) return reply.code(404).send({ error: 'Activity not found' });
 
+    // A crop made before recording_elapsed_s existed left no record of how long the
+    // recording was, which would strand the trim editor at its own cut. The original
+    // file still knows, so work it out once and keep it.
+    if (row.recording_elapsed_s == null && (row.crop_start_s != null || row.crop_end_s != null)) {
+      const fresh = readOriginalActivity(db, row);
+      const full = Number.isFinite(fresh?.elapsedS) ? Math.round(fresh.elapsedS) : null;
+      if (full != null) {
+        db.prepare('UPDATE activities SET recording_elapsed_s = ? WHERE id = ?').run(full, row.id);
+        row.recording_elapsed_s = full;
+      }
+    }
+
     const laps = db.prepare('SELECT * FROM laps WHERE activity_id = ? ORDER BY idx').all(row.id);
     const channels = db.prepare('SELECT channel, n FROM streams WHERE activity_id = ?').all(row.id);
     const efforts = db.prepare(
@@ -85,6 +97,10 @@ export function registerActivityRoutes(app, { db }) {
       // The crop currently in force, so the editor opens where you left it.
       cropStartS: row.crop_start_s,
       cropEndS: row.crop_end_s,
+      // How long the recording is with no crop applied — the range the trim editor is
+      // allowed to span. elapsedS is the CROPPED length once a crop is in force, so
+      // using that as the bound is what stopped you from ever undoing a trim by hand.
+      recordingElapsedS: row.recording_elapsed_s ?? row.elapsed_s,
       bbox: row.bbox_json ? JSON.parse(row.bbox_json) : null,
       timezone: row.timezone,
       laps,
@@ -116,16 +132,38 @@ export function registerActivityRoutes(app, { db }) {
     const requested = request.query?.channels
       ? String(request.query.channels).split(',')
       : null;
-    const rows = readStreamRows(db, row.id)
-      .filter((r) => !requested || requested.includes(r.channel));
-
-    if (!rows.length) return { channels: {}, n: 0 };
 
     const decoded = {};
     let n = 0;
-    for (const streamRow of rows) {
-      decoded[streamRow.channel] = decodeStream(streamRow);
-      n = Math.max(n, decoded[streamRow.channel].length);
+
+    // `full=1` asks for the whole recording rather than what is left after the crop.
+    // The trim editor needs it: with only the cropped samples on the page there is
+    // nothing to show for the part you are trying to put back, so the handles would
+    // move over data that is not there.
+    const wantsFull = request.query?.full === '1' || request.query?.full === 'true';
+    const cropped = row.crop_start_s != null || row.crop_end_s != null;
+
+    if (wantsFull && cropped) {
+      const fresh = readOriginalActivity(db, row);
+      if (!fresh) return reply.code(404).send({ error: 'The original file is unavailable' });
+      for (const [channel, values] of Object.entries(fresh.streams || {})) {
+        if (!Array.isArray(values)) continue;
+        if (requested && !requested.includes(channel)) continue;
+        // decimateAligned reads a gap as NaN, the way the stored streams encode one.
+        decoded[channel] = Float64Array.from(values, (v) => (Number.isFinite(v) ? v : NaN));
+        n = Math.max(n, decoded[channel].length);
+      }
+      if (!n) return { channels: {}, n: 0 };
+    } else {
+      const rows = readStreamRows(db, row.id)
+        .filter((r) => !requested || requested.includes(r.channel));
+
+      if (!rows.length) return { channels: {}, n: 0 };
+
+      for (const streamRow of rows) {
+        decoded[streamRow.channel] = decodeStream(streamRow);
+        n = Math.max(n, decoded[streamRow.channel].length);
+      }
     }
 
     const maxPoints = clampInt(request.query?.resolution, 100, 50000, 0);
@@ -263,6 +301,7 @@ export function registerActivityRoutes(app, { db }) {
       ok: true,
       cropStartS: startS,
       cropEndS: endS,
+      recordingElapsedS: updated.recording_elapsed_s ?? updated.elapsed_s,
       distanceM: updated.distance_m,
       elapsedS: updated.elapsed_s,
       movingS: updated.moving_s,

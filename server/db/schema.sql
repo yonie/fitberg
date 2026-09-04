@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS activities (
   -- the copy reindex does not delete.
   crop_start_s       INTEGER,
   crop_end_s         INTEGER,
+  -- How long the whole recording is, crop or no crop. Without it a cropped activity
+  -- forgets how much was cut and the trim editor cannot open back out past its own cut.
+  recording_elapsed_s INTEGER,
 
   original_hash    TEXT REFERENCES originals(hash),
   summary_json     TEXT,                   -- source's own summary payload, verbatim

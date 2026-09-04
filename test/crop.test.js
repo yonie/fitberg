@@ -128,6 +128,41 @@ test('crop: a TCX-backed activity crops too, not just a FIT one', async () => {
   assert.ok(restored.distance_m > 3500, `expected ~3600 m back, got ${restored.distance_m}`);
 });
 
+test('crop: the whole recording\'s length survives the crop, so a trim can be widened', async () => {
+  // A crop overwrites elapsed_s with the CROPPED length. The trim editor bounds its
+  // handles by the recording length, so without a separate record of it the slider ends
+  // at the cut: every trim could be tightened and none could ever be loosened.
+  const startMs = Date.UTC(2025, 6, 2, 6, 30, 0);
+  const samples = syntheticRun({ n: 1200, startMs });
+  const bytes = makeFit(samples, { sport: 'running', deriveSummary: true });
+
+  const report = await ingestBuffer(db, USER, bytes, {
+    filename: 'crop-widen.fit', recomputeMetrics: false,
+  });
+  const [id] = report.activityIds;
+  const read = () => db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+
+  // Untouched, the two agree.
+  const before = read();
+  assert.equal(before.recording_elapsed_s, before.elapsed_s);
+
+  // Trim to 10 minutes: elapsed follows the crop, the recording length does not.
+  assert.equal(applyCrop(db, before, { crop_start_s: 0, crop_end_s: 600 }), true);
+  const tight = read();
+  assert.ok(tight.elapsed_s <= 601, `expected ~600 s, got ${tight.elapsed_s}`);
+  assert.ok(
+    tight.recording_elapsed_s >= 1100,
+    `the recording is ~1199 s; got ${tight.recording_elapsed_s}`,
+  );
+
+  // Which is what lets the next crop reach past the previous one.
+  assert.equal(applyCrop(db, tight, { crop_start_s: 0, crop_end_s: 900 }), true);
+  const wider = read();
+  assert.ok(wider.elapsed_s > tight.elapsed_s, 'the trim must be able to open back out');
+  assert.ok(Math.abs(wider.distance_m - 2700) < 60, `expected ~2700 m, got ${wider.distance_m}`);
+  assert.ok(wider.recording_elapsed_s >= 1100, 'and the recording length still stands');
+});
+
 test('crop: a window that would leave nothing is refused', () => {
   const samples = syntheticRun({ n: 600, startMs: Date.UTC(2025, 4, 1) });
   const act = { startTime: Date.UTC(2025, 4, 1), streams: {}, laps: [] };
