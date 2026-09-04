@@ -26,11 +26,15 @@ import {
  */
 function CropCard({ activity, streams, onRange, onCropped }: {
   activity: Detail;
+  /** The whole recording's streams — see `fullStreams` on the page. */
   streams: StreamData | null;
   onRange: (range: [number, number] | null) => void;
   onCropped: () => void;
 }) {
-  const total = Math.max(1, Math.round(activity.elapsedS ?? 0));
+  // The WHOLE recording, not what is left of it. A crop rewrites elapsedS to the cropped
+  // length, so bounding the handles by that meant a trim could only ever be tightened —
+  // there was no way to hand any of the recording back short of starting over.
+  const total = Math.max(1, Math.round(activity.recordingElapsedS ?? activity.elapsedS ?? 0));
   const [range, setRangeState] = useState<[number, number]>(() => [
     activity.cropStartS ?? 0,
     activity.cropEndS ?? total,
@@ -161,6 +165,12 @@ export function ActivityDetail({ config }: { config: AppConfig }) {
   // Cap the resolution: a 6-hour ride is 20 000+ samples per channel and a chart
   // cannot show more than a couple of thousand anyway.
   const streams = useGet<StreamData>(`/api/activities/${id}/streams?resolution=1500`, [id]);
+  // The charts and the map show the activity as trimmed; the trim editor has to show the
+  // whole recording, or the handles would drag over samples that are no longer on the
+  // page. Same request when nothing is cropped, so this costs nothing in that case.
+  const fullStreams = useGet<StreamData>(
+    `/api/activities/${id}/streams?resolution=1500&full=1`, [id],
+  );
 
   if (detail.loading) return <Loading />;
   if (detail.error) return <ErrorNotice error={detail.error} onRetry={detail.reload} />;
@@ -187,7 +197,11 @@ export function ActivityDetail({ config }: { config: AppConfig }) {
       for (let i = 0; i < t.length; i++) if (t[i] <= seconds) best = i;
       return best;
     };
-    return { from: indexAt(trimRange[0]), to: indexAt(trimRange[1]) };
+    // The slider speaks whole-recording seconds; the map is drawing the CROPPED track,
+    // whose clock was re-based to zero at the existing cut. Without this offset the
+    // overlay on an already-trimmed activity marks the wrong place entirely.
+    const base = a.cropStartS ?? 0;
+    return { from: indexAt(trimRange[0] - base), to: indexAt(trimRange[1] - base) };
   })();
 
   const powerCurve = a.bestEfforts.filter((e) => e.kind === 'peak_power');
@@ -264,9 +278,14 @@ export function ActivityDetail({ config }: { config: AppConfig }) {
 
       <CropCard
         activity={a}
-        streams={streams.data ?? null}
+        streams={fullStreams.data ?? streams.data ?? null}
         onRange={setTrimRange}
-        onCropped={() => { setTrimRange(null); detail.reload(); streams.reload(); }}
+        onCropped={() => {
+          setTrimRange(null);
+          detail.reload();
+          streams.reload();
+          fullStreams.reload();
+        }}
       />
 
       {/* The flyover. */}

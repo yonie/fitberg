@@ -74,6 +74,12 @@ const MIGRATIONS = [
     sql: 'ALTER TABLE activities ADD COLUMN device TEXT',
   },
   {
+    // A crop overwrites elapsed_s with the cropped length, which left the trim editor
+    // bounded by its own cut: you could always trim further, never put any of it back.
+    id: '2026-09-04-recording-elapsed',
+    sql: 'ALTER TABLE activities ADD COLUMN recording_elapsed_s INTEGER',
+  },
+  {
     // The integrations table for the COROS connector. schema.sql already creates
     // it (CREATE TABLE IF NOT EXISTS), so fresh databases do not need this entry
     // executed — but old ones re-apply schema.sql on startup, which is how they
