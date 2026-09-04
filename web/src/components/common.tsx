@@ -149,9 +149,18 @@ export function Metric({ label, value, unit, hint }: {
   label: string; value: ReactNode; unit?: string; hint?: string;
 }) {
   return (
-    <div title={hint}>
+    // A grid item refuses to shrink below its content by default, and some values are one
+    // long unbreakable token — a TCX import names the original after its own content hash,
+    // which is 68 characters with nowhere to wrap. Left alone it widened its column, the
+    // card, and the page, so the whole document scrolled sideways.
+    <div title={hint} style={{ minWidth: 0 }}>
       <div className="stat-label">{label}</div>
-      <div style={{ fontSize: '1.125rem', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+      <div style={{
+        fontSize: '1.125rem',
+        fontWeight: 600,
+        fontVariantNumeric: 'tabular-nums',
+        overflowWrap: 'anywhere',
+      }}>
         {value}{unit && <small style={{ fontSize: '0.7em', fontWeight: 500, color: 'var(--text-2)', marginLeft: '0.15em' }}>{unit}</small>}
       </div>
     </div>
