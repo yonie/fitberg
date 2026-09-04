@@ -141,6 +141,7 @@ export function applyCrop(db, activity, edit) {
       avg_hr = ?, max_hr = ?, avg_power = ?, max_power = ?, normalized_power = ?,
       avg_cadence = ?, avg_speed_ms = ?, max_speed_ms = ?,
       calories = ?, work_kj = ?, polyline = ?,
+      bbox_json = ?, start_lat = ?, start_lng = ?,
       crop_start_s = ?, crop_end_s = ?, recording_elapsed_s = ?, updated_at = ?
     WHERE id = ?`).run(
     cropped.elapsedS ?? null, cropped.movingS ?? null, cropped.distanceM ?? null,
@@ -153,6 +154,11 @@ export function applyCrop(db, activity, edit) {
     // Calories scale with the fraction of the activity kept; there is no better
     // estimate available once samples are gone.
     cropped.calories ?? null, cropped.workKj ?? null, cropped.polyline ?? null,
+    // The map's framing and the start pin come from these, and they described the whole
+    // recording: a run cropped to a lap of the track still reported a bounding box the
+    // size of the drive home.
+    cropped.bbox ? JSON.stringify(cropped.bbox) : null,
+    cropped.startLat ?? null, cropped.startLng ?? null,
     edit.crop_start_s ?? null, edit.crop_end_s ?? null,
     // elapsed_s above is now the CROPPED length. The whole recording's length has to be
     // kept separately or the trim editor has no idea how much it is allowed to put back.
@@ -219,6 +225,10 @@ export function cropActivity(act, startS, endS) {
     'elapsedS', 'movingS', 'distanceM', 'elevGainM', 'elevLossM',
     'avgHr', 'maxHr', 'avgPower', 'maxPower', 'normalizedPower',
     'avgCadence', 'maxCadence', 'avgSpeedMs', 'maxSpeedMs', 'workKj', 'polyline',
+    // The route's own geometry, which finalizeActivity only recomputes when it is absent.
+    // Left in place, a cropped activity kept the whole recording's bounding box and start
+    // point — so the map framed a lap of the track as if it were still the drive home.
+    'bbox', 'startLat', 'startLng',
   ]) {
     next[field] = null;
   }

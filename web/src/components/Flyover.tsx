@@ -551,6 +551,48 @@ export function Flyover(props: FlyoverProps) {
     renderAt(props.externalIndex);
   }, [props.externalIndex, mode, renderAt]);
 
+  // ─── the route changed under us ───────────────────────────────────────────
+  //
+  // Applying a trim replaces the route while this component stays mounted, and the
+  // sources above are built once, inside the effect that creates the map. So the map
+  // went on drawing the whole recording after a crop — the numbers, the charts and the
+  // list preview all updated, and the flyover alone still showed the part you had just
+  // cut off. It looked right often enough to be baffling: React tears the component down
+  // and rebuilds it whenever the track briefly disappears mid-refetch, and that hid the
+  // staleness on exactly the paths one tends to try first.
+  //
+  // Rebuilding the map here is still the wrong answer — that is what would cost the GPU
+  // context. Only the data needs replacing, and then the camera needs to be told.
+  const routeKey = coordinates.length
+    ? `${pointCount}:${coordinates[0]}:${coordinates[coordinates.length - 1]}`
+    : '';
+  const firstRouteRef = useRef(routeKey);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || pointCount < 2) return;
+    // The mount already drew this one; only later changes need doing again.
+    if (firstRouteRef.current === routeKey) return;
+    firstRouteRef.current = routeKey;
+
+    const route = map.getSource('route') as maplibregl.GeoJSONSource | undefined;
+    const points = map.getSource('route-points') as maplibregl.GeoJSONSource | undefined;
+    if (!route || !points) return;
+
+    route.setData({
+      type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates },
+    } as any);
+    points.setData({
+      type: 'Feature', properties: {}, geometry: { type: 'MultiPoint', coordinates },
+    } as any);
+
+    // Rewind: the old position is an index into a route that no longer exists.
+    progressRef.current = 0;
+    bearingRef.current = null;
+    renderAt(0);
+    if (modeRef.current === 'overview') fitToRoute(map, coordinates, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeKey, ready]);
+
   // ─── trim preview ─────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
@@ -577,8 +619,10 @@ export function Flyover(props: FlyoverProps) {
         geometry: { type: 'Point', coordinates: coord },
       })),
     } as any);
+    // routeKey, because the preview is drawn from `coordinates` — after a trim it must be
+    // recomputed against the new route, not the one captured on the last render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.trim?.from, props.trim?.to, ready, pointCount]);
+  }, [props.trim?.from, props.trim?.to, ready, pointCount, routeKey]);
 
 
   if (pointCount < 2) {

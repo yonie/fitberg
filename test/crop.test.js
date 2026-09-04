@@ -163,6 +163,41 @@ test('crop: the whole recording\'s length survives the crop, so a trim can be wi
   assert.ok(wider.recording_elapsed_s >= 1100, 'and the recording length still stands');
 });
 
+test('crop: the route geometry is re-derived, not carried over whole', async () => {
+  // bbox and the start point are what the map frames itself by, and finalizeActivity only
+  // computes them when they are absent — so a cropped activity kept the whole recording's
+  // box and drew a lap of the track zoomed out over the drive home.
+  const startMs = Date.UTC(2025, 7, 5, 7, 0, 0);
+  const samples = syntheticRun({ n: 1200, startMs });
+  const bytes = makeFit(samples, { sport: 'running', deriveSummary: true });
+
+  const report = await ingestBuffer(db, USER, bytes, {
+    filename: 'crop-bbox.fit', recomputeMetrics: false,
+  });
+  const [id] = report.activityIds;
+  const before = db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+  const fullBox = JSON.parse(before.bbox_json);
+
+  assert.equal(applyCrop(db, before, { crop_start_s: 0, crop_end_s: 600 }), true);
+  const after = db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+  const cropBox = JSON.parse(after.bbox_json);
+
+  // The run heads due north, so half the recording is half the latitude span.
+  const span = (b) => b.maxLat - b.minLat;
+  assert.ok(
+    span(cropBox) < span(fullBox) * 0.6,
+    `bbox must shrink with the crop: ${span(cropBox)} vs ${span(fullBox)}`,
+  );
+
+  // And a crop from the front moves the start pin.
+  assert.equal(applyCrop(db, after, { crop_start_s: 600, crop_end_s: null }), true);
+  const tail = db.prepare('SELECT * FROM activities WHERE id = ?').get(id);
+  assert.ok(
+    tail.start_lat > before.start_lat,
+    `the start must move north with the cut: ${tail.start_lat} vs ${before.start_lat}`,
+  );
+});
+
 test('crop: a window that would leave nothing is refused', () => {
   const samples = syntheticRun({ n: 600, startMs: Date.UTC(2025, 4, 1) });
   const act = { startTime: Date.UTC(2025, 4, 1), streams: {}, laps: [] };
