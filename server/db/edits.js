@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { writeStreams, writeLaps } from './repo.js';
 import { absPathFor } from '../lib/blobstore.js';
 import { parseFit } from '../parsers/fit.js';
+import { parseTcx } from '../parsers/tcx.js';
+import { sniff, KINDS } from '../ingest/sniff.js';
 import { finalizeActivity, streamLength } from '../parsers/canonical.js';
 
 // User edits: the things you typed, and the crop you set.
@@ -128,7 +130,11 @@ export function applyCrop(db, activity, edit) {
   let fresh;
   try {
     const buffer = readFileSync(absPathFor(original.rel_path));
-    const parsed = parseFit(buffer, { source: activity.source || 'file' });
+    // Re-parse with whatever reads this file, sniffed from the bytes for the same reason
+    // ingest does it that way. Assuming FIT here made every TCX-backed activity — a Nike
+    // Run Club export, say — refuse to crop: the parser threw, and the throw looked from
+    // the outside exactly like a crop that would leave nothing.
+    const parsed = parserFor(buffer)(buffer, { source: activity.source || 'file' });
     // A multisport file holds several activities; match on start time rather than
     // assuming the first one.
     fresh = parsed.activities.find((a) => Math.abs(a.startTime - activity.start_time) < 120000)
@@ -246,6 +252,18 @@ export function cropActivity(act, startS, endS) {
   finalizeActivity(next);
   if (streamLength(next.streams) < 2) return null;
   return next;
+}
+
+/**
+ * The parser that reads this original, chosen by content.
+ *
+ * Originals are stored decompressed and one activity file per blob, so only the two
+ * leaf formats can turn up here — a ZIP or a gzip member was unwrapped at import.
+ */
+function parserFor(buffer) {
+  const { kind } = sniff(buffer.subarray(0, 4096));
+  if (kind === KINDS.TCX) return parseTcx;
+  return parseFit;
 }
 
 const firstFinite = (list) => list.find((v) => Number.isFinite(v));
