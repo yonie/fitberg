@@ -19,10 +19,12 @@ import { config } from '../lib/config.js';
 const METADATA_TIMEOUT_MS = 15000;
 
 export class CorosAuthError extends Error {
-  constructor(message, { cause = null } = {}) {
+  constructor(message, { cause = null, code = null } = {}) {
     super(message);
     this.name = 'CorosAuthError';
     this.cause = cause;
+    // The OAuth error code (RFC 6749 §5.2), e.g. invalid_grant, when COROS sent one.
+    this.code = code;
   }
 }
 
@@ -33,7 +35,7 @@ async function fetchJson(url, opts = {}, fetchImpl = globalThis.fetch) {
   try { json = JSON.parse(text); } catch { /* handled below */ }
   if (!res.ok) {
     const detail = json?.error_description || json?.error || text.slice(0, 300) || `HTTP ${res.status}`;
-    throw new CorosAuthError(`COROS ${new URL(url).pathname}: ${detail}`);
+    throw new CorosAuthError(`COROS ${new URL(url).pathname}: ${detail}`, { code: json?.error || null });
   }
   if (!json) throw new CorosAuthError(`COROS ${new URL(url).pathname}: not JSON`);
   return json;

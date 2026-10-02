@@ -247,7 +247,7 @@ function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
 // can happen in different processes, so a socket bound at evaluation time is
 // not guaranteed to be the one tests talk to.
 const fake = fakeCoros();
-let db, USER, syncCoros, discoverAuth, registerClient, createPkce,
+let db, USER, syncCoros, CorosSyncError, needsReconnect, discoverAuth, registerClient, createPkce,
   buildAuthorizeUrl, exchangeCode, chooseRedirectUri, truncateDerived, ingestBuffer;
 
 before(async () => {
@@ -258,6 +258,8 @@ before(async () => {
   db = modules.db;
   USER = modules.USER;
   syncCoros = modules.syncCoros;
+  CorosSyncError = modules.CorosSyncError;
+  needsReconnect = modules.needsReconnect;
   discoverAuth = modules.discoverAuth;
   registerClient = modules.registerClient;
   createPkce = modules.createPkce;
@@ -418,6 +420,24 @@ test('coros: token refresh mid-life works and is persisted', async () => {
   const updated = db.prepare('SELECT * FROM integration_accounts WHERE id = ?').get(account.id);
   assert.notEqual(updated.access_token, account.access_token);
   assert.ok(updated.token_expires_at > Date.now());
+});
+
+test('coros: a refresh token COROS rejects becomes a reconnect, not a retry loop', async () => {
+  reset();
+  const account = await connectAccount('Revoked Tester');
+  db.prepare('UPDATE integration_accounts SET token_expires_at = ? WHERE id = ?')
+    .run(Date.now() - 1000, account.id);
+  // COROS forgets the refresh token (revoked, or expired on their side).
+  fake.state.refreshTokens.clear();
+
+  await assert.rejects(
+    () => syncCoros(db, USER, corosAccount()),
+    (err) => err instanceof CorosSyncError && err.authExpired,
+  );
+  const after = corosAccount();
+  assert.equal(after.refresh_token, null);
+  assert.equal(after.access_token, null);
+  assert.equal(needsReconnect(after), true);
 });
 
 test('coros: quota stops a large backfill and it resumes next sync', async () => {

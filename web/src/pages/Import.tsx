@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { useGet } from '../lib/hooks';
 import { Card, ErrorNotice, Loading } from '../components/common';
 import { relativeTime, number } from '../lib/format';
@@ -119,6 +119,8 @@ const SOURCES = [
 
 interface CorosStatus {
   connected: boolean;
+  /** Connected, but COROS rejected the stored login: only Connect can fix it. */
+  needsReconnect?: boolean;
   accountName?: string | null;
   lastSyncAt?: number | null;
   lastSync?: {
@@ -146,11 +148,11 @@ function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
   // The connect finishes in another tab; refresh this card when the user comes
   // back, rather than making them reload.
   useEffect(() => {
-    const onFocus = () => { if (!status.data?.connected) status.reload(); };
+    const onFocus = () => { if (!status.data?.connected || status.data.needsReconnect) status.reload(); };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.data?.connected]);
+  }, [status.data?.connected, status.data?.needsReconnect]);
 
   const connect = async () => {
     setBusy('connect');
@@ -199,7 +201,11 @@ function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
         setError(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sync failed');
+      // A dead login comes back as 401 + reconnect; the reloaded card says so
+      // and offers Reconnect, so there is no error to show on top of it.
+      if (!(err instanceof ApiError && err.body?.reconnect)) {
+        setError(err instanceof Error ? err.message : 'Sync failed');
+      }
     } finally {
       setBusy(null);
       status.reload();
@@ -219,9 +225,42 @@ function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
   };
 
   const last = status.data?.lastSync;
-  const sub = status.data?.connected
-    ? (status.data.accountName ? `Connected — ${status.data.accountName}` : 'Connected')
-    : 'Not connected';
+  const expired = !!(status.data?.connected && status.data.needsReconnect);
+  const sub = expired
+    ? 'Login expired'
+    : status.data?.connected
+      ? (status.data.accountName ? `Connected — ${status.data.accountName}` : 'Connected')
+      : 'Not connected';
+
+  const pasteBox = awaitingPaste && (
+    <div className="notice" style={{ marginBottom: '0.875rem' }}>
+      <span className="notice-icon" aria-hidden="true">i</span>
+      <div style={{ display: 'grid', gap: '0.5rem' }}>
+        <span>
+          Almost there — two steps in the tab that just opened:
+        </span>
+        <ol style={{ margin: 0, paddingLeft: '1.25rem', display: 'grid', gap: '0.25rem' }}>
+          <li>Log in to COROS and approve the connection.</li>
+          <li>You land back on COROS's website. <strong>Copy the web
+              address</strong> (Ctrl+L, then Ctrl+C) and paste it below.</li>
+        </ol>
+        <div style={{ display: 'flex', gap: '0.5rem', maxWidth: '34rem' }}>
+          <input
+            type="text" value={pasted} spellCheck={false}
+            placeholder="Paste the address you landed on"
+            onChange={(e) => setPasted(e.target.value)}
+            style={{ flex: 1, minWidth: 0, fontFamily: 'var(--mono)', fontSize: '0.8125rem' }}
+          />
+          <button
+            type="button" className="btn btn-sm" disabled={!pasted || busy !== null}
+            onClick={completePaste}
+          >
+            Finish
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <Card
@@ -229,7 +268,31 @@ function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
       sub={sub}
       style={{ marginBottom: '1rem' }}
     >
-      {status.loading ? <Loading /> : status.data?.connected ? (
+      {status.loading ? <Loading /> : expired ? (
+        <>
+          <p className="card-sub" style={{ margin: '0 0 0.75rem' }}>
+            COROS no longer accepts Fitberg's login{status.data?.accountName ? ` for ${status.data.accountName}` : ''},
+            so syncing has stopped. Reconnect to pick up where it left off —
+            nothing already imported is lost.
+          </p>
+          {pasteBox}
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <button
+              type="button" className="btn btn-primary"
+              disabled={busy !== null} onClick={connect}
+            >
+              {busy === 'connect' ? <span className="spinner" /> : 'Reconnect COROS'}
+            </button>
+            <button
+              type="button" className="btn"
+              disabled={busy !== null} onClick={disconnect}
+            >
+              Disconnect
+            </button>
+            {pasteDone && <span className="card-sub">{pasteDone}</span>}
+          </div>
+        </>
+      ) : status.data?.connected ? (
         <>
           {last && (
             <div className="card-sub" style={{ marginBottom: '0.75rem' }}>
@@ -273,35 +336,7 @@ function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
             Connect your COROS account through COROS's official MCP service to pull
             new activities automatically — FIT files, straight from the source.
           </p>
-          {awaitingPaste && (
-            <div className="notice" style={{ marginBottom: '0.875rem' }}>
-              <span className="notice-icon" aria-hidden="true">i</span>
-              <div style={{ display: 'grid', gap: '0.5rem' }}>
-                <span>
-                  Almost there — two steps in the tab that just opened:
-                </span>
-                <ol style={{ margin: 0, paddingLeft: '1.25rem', display: 'grid', gap: '0.25rem' }}>
-                  <li>Log in to COROS and approve the connection.</li>
-                  <li>You land back on COROS's website. <strong>Copy the web
-                      address</strong> (Ctrl+L, then Ctrl+C) and paste it below.</li>
-                </ol>
-                <div style={{ display: 'flex', gap: '0.5rem', maxWidth: '34rem' }}>
-                  <input
-                    type="text" value={pasted} spellCheck={false}
-                    placeholder="Paste the address you landed on"
-                    onChange={(e) => setPasted(e.target.value)}
-                    style={{ flex: 1, minWidth: 0, fontFamily: 'var(--mono)', fontSize: '0.8125rem' }}
-                  />
-                  <button
-                    type="button" className="btn btn-sm" disabled={!pasted || busy !== null}
-                    onClick={completePaste}
-                  >
-                    Finish
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          {pasteBox}
           <button
             type="button" className="btn btn-primary"
             disabled={busy !== null} onClick={connect}

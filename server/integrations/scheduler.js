@@ -1,5 +1,5 @@
 import { config } from '../lib/config.js';
-import { syncCoros } from './coros-sync.js';
+import { syncCoros, needsReconnect } from './coros-sync.js';
 
 // The background COROS sync.
 //
@@ -33,6 +33,9 @@ export function startCorosScheduler(db, { log = console } = {}) {
       for (const account of accounts) {
         const overdue = !account.last_sync_at || Date.now() - account.last_sync_at >= SYNC_EVERY_MS;
         if (!overdue) continue;
+        // A dead login stays dead until the user reconnects; retrying hourly
+        // would only repeat the same warning.
+        if (needsReconnect(account)) continue;
 
         // Per account, so one expired login does not hold up everyone else on
         // a shared instance. syncCoros already records the failure on the row.

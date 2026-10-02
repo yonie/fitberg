@@ -4,7 +4,7 @@ import {
   discoverAuth, registerClient, buildAuthorizeUrl, exchangeCode,
   createPkce, revokeToken, chooseRedirectUri,
 } from '../integrations/coros-oauth.js';
-import { syncCoros, CorosSyncError } from '../integrations/coros-sync.js';
+import { syncCoros, CorosSyncError, needsReconnect } from '../integrations/coros-sync.js';
 import { createMcpClient } from '../integrations/mcp-client.js';
 
 // COROS integration routes.
@@ -31,6 +31,7 @@ export function registerCorosRoutes(app, { db }) {
 
     return {
       connected: true,
+      needsReconnect: needsReconnect(account),
       accountName: account.account_name,
       lastSyncAt: account.last_sync_at,
       lastSync: account.last_sync_status_json ? safeJson(account.last_sync_status_json) : null,

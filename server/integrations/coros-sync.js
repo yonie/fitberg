@@ -34,6 +34,11 @@ const EMPTY_SLICES_TO_STOP = 3;
 const MAX_HISTORY_SLICES = 60;
 const DAY_MS = 24 * 3600 * 1000;
 
+/** Whether the account has no usable login left and must go through Connect again. */
+export function needsReconnect(account) {
+  return !account.refresh_token && !(account.access_token && account.token_expires_at > Date.now());
+}
+
 export class CorosSyncError extends Error {
   constructor(message, { authExpired = false } = {}) {
     super(message);
@@ -63,12 +68,29 @@ export async function ensureFreshToken(db, account, { fetchImpl = fetchWithTimeo
   }
 
   const auth = await discoverAuth({ fetchImpl });
-  const tokens = await refreshTokens(auth, {
-    clientId: account.client_id,
-    clientSecret: account.client_secret,
-    refreshToken: account.refresh_token,
-    fetchImpl,
-  });
+  let tokens;
+  try {
+    tokens = await refreshTokens(auth, {
+      clientId: account.client_id,
+      clientSecret: account.client_secret,
+      refreshToken: account.refresh_token,
+      fetchImpl,
+    });
+  } catch (err) {
+    // invalid_grant: COROS no longer honours this refresh token (revoked,
+    // expired, or the client was dropped). Retrying cannot fix that, so forget
+    // the dead tokens — the account then reads as needing a reconnect, and
+    // Connect is allowed again.
+    if (err instanceof CorosAuthError && err.code === 'invalid_grant') {
+      db.prepare(`UPDATE integration_accounts
+          SET access_token = NULL, refresh_token = NULL, token_expires_at = NULL, updated_at = ?
+          WHERE id = ?`).run(Date.now(), account.id);
+      account.access_token = null;
+      account.refresh_token = null;
+      throw new CorosSyncError('COROS login has expired — reconnect it', { authExpired: true });
+    }
+    throw err;
+  }
 
   db.prepare(`UPDATE integration_accounts
       SET access_token = ?, refresh_token = COALESCE(?, refresh_token), token_expires_at = ?, updated_at = ?
