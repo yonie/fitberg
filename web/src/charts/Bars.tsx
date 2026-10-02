@@ -3,7 +3,7 @@ import {
   Tooltip, useTooltip, HoverDot,
 } from './primitives';
 import { useMeasure } from '../lib/hooks';
-import { duration, effortDuration, splitLabel, number } from '../lib/format';
+import { duration, effortDuration, splitLabel, number, shortDateLabel } from '../lib/format';
 
 // Ordinal blue ramp for the five training zones.
 //
@@ -198,6 +198,8 @@ export function SplitsTable({ splits, family }: {
   splits: {
     bucket: number; value: number; activityId: number; activityName: string | null;
     startTime: number; sport?: string;
+    /** Set when the whole activity measured just short of the distance and counts anyway. */
+    measuredM?: number;
   }[];
   /** Sport family, so a distance is named the way that sport names it. */
   family?: string;
@@ -252,8 +254,16 @@ export function SplitsTable({ splits, family }: {
                   </td>
                   <td>
                     <a href={`/activities/${s.activityId}`}>
-                      {s.activityName || new Date(s.startTime).toLocaleDateString()}
+                      {s.activityName || shortDateLabel(s.startTime)}
                     </a>
+                    {(s.activityName || s.measuredM) && (
+                      <span className="card-sub" style={{ display: 'block' }}>
+                        {[
+                          s.activityName && shortDateLabel(s.startTime),
+                          s.measuredM && `measured ${(s.measuredM / 1000).toFixed(2)} km`,
+                        ].filter(Boolean).join(' · ')}
+                      </span>
+                    )}
                   </td>
                 </tr>
               );

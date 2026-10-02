@@ -256,6 +256,27 @@ test('Records: the impossible-times toggle changes the answer', async () => {
   assert.ok(shown.fastestDistances.length >= hidden.fastestDistances.length);
 });
 
+test('Records: a race measured just short counts, unless strict', async () => {
+  // Make one run read as a GPS-short 10 km: 9.95 km, well inside the 1% allowance.
+  const run = db.prepare("SELECT id, distance_m, elapsed_s FROM activities WHERE sport = 'run' LIMIT 1").get();
+  db.prepare('UPDATE activities SET distance_m = 9950, elapsed_s = 2700 WHERE id = ?').run(run.id);
+  try {
+    const lenient = await get('/api/stats/records?sport=run');
+    const strict = await get('/api/stats/records?sport=run&strict=1');
+    assert.equal(lenient.allowingShort, true);
+    assert.equal(strict.allowingShort, false);
+
+    const tenK = lenient.fastestDistances.find((e) => e.bucket === 10000);
+    assert.equal(tenK?.activityId, run.id);
+    assert.equal(tenK.value, 2700);
+    assert.equal(tenK.measuredM, 9950);
+    assert.ok(!strict.fastestDistances.some((e) => e.measuredM), 'strict counts measured distance only');
+  } finally {
+    db.prepare('UPDATE activities SET distance_m = ?, elapsed_s = ? WHERE id = ?')
+      .run(run.distance_m, run.elapsed_s, run.id);
+  }
+});
+
 // ─── Import ───────────────────────────────────────────────────────────────────
 
 test('Import: the history of what came in', async () => {

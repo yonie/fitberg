@@ -2,7 +2,9 @@ import { getProfile } from '../metrics/engine.js';
 import { hrZones, powerZones, paceZones } from '../metrics/profile.js';
 import { interpretForm, dayRange } from '../metrics/fitness.js';
 import { readStreams } from '../db/repo.js';
-import { PEAK_DURATIONS, splitDistancesFor, MAX_SPEED_MS } from '../metrics/efforts.js';
+import {
+  PEAK_DURATIONS, splitDistancesFor, MAX_SPEED_MS, RACE_DISTANCES, RACE_SHORTFALL,
+} from '../metrics/efforts.js';
 import { familyOf } from '../parsers/sports.js';
 import { shapeActivity, ACTIVITY_SELECT } from './shape.js';
 
@@ -154,6 +156,8 @@ export function registerStatsRoutes(app, { db }) {
     const family = sport ? familyOf(sport) : null;
     // On by default; `?impossible=1` shows the lot.
     const hideImpossible = request.query?.impossible !== '1';
+    // Also on by default; `?strict=1` counts measured distance only.
+    const allowShort = request.query?.strict !== '1';
 
     const sportClause = sport ? 'AND be.sport = ?' : '';
     const sportParams = sport ? [sport] : [];
@@ -201,6 +205,27 @@ export function registerStatsRoutes(app, { db }) {
          ORDER BY be.value ASC`,
       ).all(request.userId, ...sportParams);
 
+      // A whole activity that measured just short of a race distance counts as that
+      // race, at its elapsed time. Only short: one that measured long already holds
+      // a real split over the distance.
+      if (allowShort) {
+        const activities = db.prepare(
+          `SELECT id, name, sport, start_time, distance_m, elapsed_s FROM activities
+           WHERE user_id = ? AND distance_m > 0 AND elapsed_s > 0 ${sport ? 'AND sport = ?' : ''}`,
+        ).all(request.userId, ...sportParams);
+        for (const a of activities) {
+          for (const bucket of RACE_DISTANCES[familyOf(a.sport)] ?? []) {
+            if (a.distance_m < bucket && a.distance_m >= bucket * (1 - RACE_SHORTFALL)) {
+              rows.push({
+                bucket, value: a.elapsed_s, activity_id: a.id, start_time: a.start_time,
+                sport: a.sport, name: a.name, measured_m: a.distance_m,
+              });
+            }
+          }
+        }
+        rows.sort((x, y) => x.value - y.value);
+      }
+
       // Rows arrive fastest-first, so the first hit per (family, bucket) is the record —
       // but the filter has to be applied while choosing, not afterwards. Filtering the
       // chosen row would leave a distance empty whenever its fastest split is the bogus
@@ -223,6 +248,7 @@ export function registerStatsRoutes(app, { db }) {
             activityName: row.name,
             sport: row.sport,
             startTime: row.start_time,
+            ...(row.measured_m ? { measuredM: row.measured_m } : {}),
           });
         }
       }
@@ -245,6 +271,7 @@ export function registerStatsRoutes(app, { db }) {
       sport,
       family,
       hidingImpossible: hideImpossible,
+      allowingShort: allowShort,
       powerCurve: best('peak_power', PEAK_DURATIONS),
       hrCurve: best('peak_hr', PEAK_DURATIONS),
       fastestDistances: flat,

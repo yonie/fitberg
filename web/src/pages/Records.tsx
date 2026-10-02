@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { useGet } from '../lib/hooks';
 import { Card, Loading, ErrorNotice, Empty } from '../components/common';
 import { EffortCurve, SplitsTable } from '../charts/Bars';
+import { shortDateLabel } from '../lib/format';
 
 interface Effort {
   bucket: number; value: number; activityId: number; activityName: string | null;
-  startTime: number; sport?: string;
+  startTime: number; sport?: string; measuredM?: number;
 }
 
 interface RecordsData {
@@ -34,9 +35,12 @@ export function Records() {
   // A forgotten stop puts the drive home in the file, which shows up as a 45 km/h
   // running split. Hidden by default, but it is a switch, not a decision made for you.
   const [showImpossible, setShowImpossible] = useState(false);
+  // GPS measures most races a little short. Counted by default; strict is a tick away.
+  const [strict, setStrict] = useState(false);
   const sports = useGet<{ sports: { sport: string; label: string; count: number }[] }>('/api/activities/sports');
-  const query = [sport && `sport=${sport}`, showImpossible && 'impossible=1'].filter(Boolean).join('&');
-  const records = useGet<RecordsData>(`/api/stats/records${query ? `?${query}` : ''}`, [sport, showImpossible]);
+  const query = [sport && `sport=${sport}`, showImpossible && 'impossible=1', strict && 'strict=1']
+    .filter(Boolean).join('&');
+  const records = useGet<RecordsData>(`/api/stats/records${query ? `?${query}` : ''}`, [sport, showImpossible, strict]);
 
   const hasAnything = Boolean(
     records.data && (
@@ -81,6 +85,24 @@ export function Records() {
             Forget to stop your watch and the drive home lands in the file, which reads as a
             45 km/h running split. Those are hidden unless you tick this. Trim the activity to
             fix it properly.
+          </span>
+        </span>
+      </label>
+
+      <label style={{
+        display: 'flex', gap: '0.5rem', alignItems: 'baseline',
+        fontSize: '0.875rem', marginBottom: '1rem',
+      }}>
+        <input
+          type="checkbox" checked={strict}
+          onChange={(e) => setStrict(e.target.checked)}
+        />
+        <span>
+          Strict distances
+          <span className="card-sub" style={{ display: 'block' }}>
+            GPS measures most races a little short, so a half marathon can come out at 20.9 km.
+            An activity up to 1% short of a 5 km, 10 km, half or full marathon counts as that
+            race at its finishing time, unless you tick this.
           </span>
         </span>
       </label>
@@ -166,8 +188,13 @@ function PowerTable({ rows, unit }: {
                 <td className="num">{Math.round(r.value)} {unit}</td>
                 <td>
                   <a href={`/activities/${r.activityId}`}>
-                    {r.activityName || new Date(r.startTime).toLocaleDateString()}
+                    {r.activityName || shortDateLabel(r.startTime)}
                   </a>
+                  {r.activityName && (
+                    <span className="card-sub" style={{ display: 'block' }}>
+                      {shortDateLabel(r.startTime)}
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}

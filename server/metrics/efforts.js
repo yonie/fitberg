@@ -46,6 +46,19 @@ export const MAX_SPEED_MS = {
   row: 6.5,    // the 2 k record is about 5.7
 };
 
+// Race distances, and how far short of one a whole activity may measure and still
+// count as having run it.
+//
+// GPS cuts corners, so a watch routinely logs an official half marathon as 20.9 km —
+// and then the race is missing from the records, because no 21.1 km split exists in
+// it. Like MAX_SPEED_MS this applies when *reading* records only: nothing stored
+// changes, and the Records page has a switch to go strict.
+export const RACE_DISTANCES = {
+  run: [5000, 10000, 21097.5, 42195],
+  walk: [5000, 10000, 21097.5, 42195],
+};
+export const RACE_SHORTFALL = 0.01;
+
 /** Every distance any family records over — for validating a stored bucket. */
 export const SPLIT_DISTANCES = [...new Set(Object.values(SPLITS).flat())].sort((a, b) => a - b);
 
