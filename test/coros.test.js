@@ -31,7 +31,7 @@ const { syntheticRun, makeFit, BASE_TIME } = await import('./fixtures.js');
  * A fake COROS stack: MCP endpoint + OAuth AS on one origin.
  *
  * @param {object} opts
- * @param {Array}  opts.activities  [{ id, startTime, fit }] served by querySportRecords
+ * @param {Array}  opts.activities  [{ meta: { id, startTime, name }, fit }] served by querySportRecords
  * @param {number} [opts.tokenTtlS]  access-token lifetime; short to test refresh
  */
 function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
@@ -184,9 +184,10 @@ function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
 
           // The real tool answers in a human-readable listing, not JSON; the
           // fake emits the same shape, one record per activity in the window.
+          // The name sits on the Location line, where COROS puts it.
           const lines = selected.map((a, i) => [
             `${i + 1}. ${a.meta.sport || 'Outdoor Run'} — ${new Date(a.meta.startTime).toISOString().slice(0, 10)}`,
-            '   Location: Fake',
+            `   Location: ${a.meta.name ?? 'Utrecht Run'}`,
             `   Time Window: startTimestamp=${Math.floor(a.meta.startTime / 1000)} | endTimestamp=${Math.floor(a.meta.startTime / 1000) + 1000}`,
             `   LabelId: ${a.meta.id} | SportType: ${a.meta.sportCode || 100}`,
           ].join('\n'));
@@ -248,7 +249,8 @@ function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
 // not guaranteed to be the one tests talk to.
 const fake = fakeCoros();
 let db, USER, syncCoros, CorosSyncError, needsReconnect, discoverAuth, registerClient, createPkce,
-  buildAuthorizeUrl, exchangeCode, chooseRedirectUri, truncateDerived, ingestBuffer;
+  buildAuthorizeUrl, exchangeCode, chooseRedirectUri, truncateDerived, ingestBuffer,
+  reindex, saveEdit, applyEdits;
 
 before(async () => {
   await fake.listen();
@@ -268,6 +270,9 @@ before(async () => {
   chooseRedirectUri = modules.chooseRedirectUri;
   truncateDerived = modules.truncateDerived;
   ingestBuffer = modules.ingestBuffer;
+  reindex = modules.reindex;
+  saveEdit = modules.saveEdit;
+  applyEdits = modules.applyEdits;
 });
 
 after(async () => {
@@ -278,6 +283,8 @@ function reset() {
   truncateDerived(db);
   db.prepare('DELETE FROM originals').run();
   db.prepare('DELETE FROM integration_accounts').run();
+  db.prepare('DELETE FROM activity_names').run();
+  db.prepare('DELETE FROM activity_edits').run();
   const originals = path.join(DATA_DIR, 'originals');
   fs.rmSync(originals, { recursive: true, force: true });
   fs.mkdirSync(originals, { recursive: true });
@@ -638,6 +645,136 @@ test('coros: an activity deleted in Fitberg is not fetched all over again', asyn
   const second = await syncCoros(db, USER, corosAccount());
   assert.equal(second.downloaded, 0, 'the deletion stands, and costs no quota');
   assert.equal(fake.state.fitDownloads, 1);
+});
+
+/** The stored name of the one activity starting at `startMs`. */
+function nameAt(startMs) {
+  return db.prepare('SELECT name FROM activities WHERE user_id = ? AND start_time = ?')
+    .get(USER, startMs)?.name;
+}
+
+test('coros: a fresh import takes the name COROS gives it', async () => {
+  reset();
+  fake.state.activities = [{
+    meta: { id: 'n1', startTime: BASE_TIME, name: 'Vianen Field Hockey' },
+    fit: makeFit(syntheticRun({ n: 200, speed: 3.0, startMs: BASE_TIME })),
+  }];
+
+  const report = await syncCoros(db, USER, await connectAccount('Name Tester'));
+  assert.equal(report.imported, 1);
+  assert.equal(report.namesUpdated, 1);
+  assert.equal(nameAt(BASE_TIME), 'Vianen Field Hockey', 'the FIT file has no title; the listing does');
+});
+
+test('coros: a rename in COROS comes through on a sync with nothing new', async () => {
+  // Same library as above. The user renames the activity in the COROS app,
+  // which changes nothing that would be downloaded.
+  fake.state.activities[0].meta.name = 'Singelloop 2026';
+
+  const report = await syncCoros(db, USER, corosAccount());
+  assert.equal(report.downloaded, 0);
+  assert.equal(fake.state.fitDownloads, 1, 'a rename costs no FIT download');
+  assert.equal(report.namesUpdated, 1);
+  assert.equal(nameAt(BASE_TIME), 'Singelloop 2026');
+
+  // And a name that stays put is not counted again.
+  const quiet = await syncCoros(db, USER, corosAccount());
+  assert.equal(quiet.namesUpdated, 0);
+});
+
+test('coros: a name typed in Fitberg beats any COROS rename', async () => {
+  const { dedupe_key: key } = db.prepare('SELECT dedupe_key FROM activities WHERE user_id = ? AND start_time = ?')
+    .get(USER, BASE_TIME);
+  saveEdit(db, USER, key, { name: 'Mine' });
+  applyEdits(db, USER);
+
+  fake.state.activities[0].meta.name = 'Singelloop 2026, PR';
+  const report = await syncCoros(db, USER, corosAccount());
+  assert.equal(report.namesUpdated, 0);
+  assert.equal(nameAt(BASE_TIME), 'Mine');
+});
+
+test('coros: an unchanged COROS name leaves an existing name alone; a rename does not', async () => {
+  reset();
+  const startMs = BASE_TIME + 4 * 86400000;
+  // In the library before COROS was connected, with the title a Strava export gave it.
+  await ingestBuffer(db, USER, makeFit(syntheticRun({ n: 300, speed: 3.1, startMs })), {
+    filename: 'strava.fit', source: 'strava',
+  });
+  db.prepare('UPDATE activities SET name = ? WHERE user_id = ?').run('Tempo with the club', USER);
+
+  fake.state.activities = [{
+    meta: { id: 'sn1', startTime: startMs, name: 'Utrecht Run' },
+    fit: makeFit(syntheticRun({ n: 500, speed: 2.9, startMs })),
+  }];
+  const first = await syncCoros(db, USER, await connectAccount('Strava Name Tester'));
+  assert.equal(first.alreadyHave, 1);
+  assert.equal(first.namesUpdated, 0);
+  assert.equal(nameAt(startMs), 'Tempo with the club', "COROS's default does not replace a real title");
+
+  const second = await syncCoros(db, USER, corosAccount());
+  assert.equal(second.namesUpdated, 0);
+  assert.equal(nameAt(startMs), 'Tempo with the club');
+
+  // Matched on start second, since this row has no COROS id.
+  fake.state.activities[0].meta.name = 'Clubrecord 10k';
+  const third = await syncCoros(db, USER, corosAccount());
+  assert.equal(third.namesUpdated, 1);
+  assert.equal(nameAt(startMs), 'Clubrecord 10k');
+  assert.equal(fake.state.fitDownloads, 0);
+});
+
+test('coros: a COROS name survives a reindex', async () => {
+  reset();
+  fake.state.activities = [{
+    meta: { id: 'ri1', startTime: BASE_TIME, name: 'Nieuwegein Padel' },
+    fit: makeFit(syntheticRun({ n: 200, speed: 3.0, startMs: BASE_TIME })),
+  }];
+  await syncCoros(db, USER, await connectAccount('Reindex Tester'));
+  assert.equal(nameAt(BASE_TIME), 'Nieuwegein Padel');
+
+  // The file has no title to rebuild the name from; activity_names does.
+  const result = await reindex(db, USER);
+  assert.equal(result.failed, 0);
+  assert.equal(nameAt(BASE_TIME), 'Nieuwegein Padel');
+});
+
+test('coros: a rename over a name from the file survives a reindex', async () => {
+  reset();
+  // A structured workout: the file carries a title, so the activity has a name before
+  // COROS ever says anything.
+  fake.state.activities = [{
+    meta: { id: 'rf1', startTime: BASE_TIME, name: 'Utrecht Run' },
+    fit: makeFit(syntheticRun({ n: 200, speed: 3.0, startMs: BASE_TIME }), { name: '6x800m' }),
+  }];
+  const first = await syncCoros(db, USER, await connectAccount('File Name Tester'));
+  assert.equal(first.namesUpdated, 0);
+  assert.equal(nameAt(BASE_TIME), '6x800m', "COROS's default does not replace the file's title");
+
+  // A reindex with no rename yet keeps the file's title (rule 4).
+  await reindex(db, USER);
+  assert.equal(nameAt(BASE_TIME), '6x800m');
+
+  fake.state.activities[0].meta.name = 'Baantraining';
+  const second = await syncCoros(db, USER, corosAccount());
+  assert.equal(second.namesUpdated, 1);
+  assert.equal(nameAt(BASE_TIME), 'Baantraining');
+
+  // The reindex rebuilds the name from the file; the rename has to come back anyway,
+  // because the next sync sees the same COROS name and does nothing.
+  const result = await reindex(db, USER);
+  assert.equal(result.failed, 0);
+  assert.equal(nameAt(BASE_TIME), 'Baantraining');
+  const quiet = await syncCoros(db, USER, corosAccount());
+  assert.equal(quiet.namesUpdated, 0);
+  assert.equal(nameAt(BASE_TIME), 'Baantraining');
+
+  // And a typed name still beats the re-applied rename after a reindex.
+  const { dedupe_key: key } = db.prepare('SELECT dedupe_key FROM activities WHERE user_id = ? AND start_time = ?')
+    .get(USER, BASE_TIME);
+  saveEdit(db, USER, key, { name: 'Mine' });
+  await reindex(db, USER);
+  assert.equal(nameAt(BASE_TIME), 'Mine');
 });
 
 test('coros: wrong bearer is an auth error, not a crash', async () => {

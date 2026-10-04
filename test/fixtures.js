@@ -52,6 +52,7 @@ export function syntheticRun({
  */
 export function makeFit(samples, {
   sport = 'running', subSport = 'generic', withSession = true, deriveSummary = false,
+  name = null,
 } = {}) {
   const encoder = new Encoder();
   const start = samples[0].timestamp;
@@ -108,6 +109,11 @@ export function makeFit(samples, {
     timeCreated: start,
     serialNumber: 987654321,
   });
+
+  // The one title a FIT file can carry: that of the structured workout it followed.
+  if (name) {
+    encoder.writeMesg({ mesgNum: Profile.MesgNum.WORKOUT, wktName: name, sport });
+  }
 
   for (const s of samples) {
     encoder.writeMesg({

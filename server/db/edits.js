@@ -293,3 +293,83 @@ function parserFor(buffer) {
 
 const firstFinite = (list) => list.find((v) => Number.isFinite(v));
 const round = (v) => (Number.isFinite(v) ? Math.round(v) : null);
+
+// ─── names from a source ──────────────────────────────────────────────────────
+//
+// What a connected platform calls an activity. COROS's FIT files carry no title, so the
+// name it shows only ever reaches us through its activity listing — and a rename there
+// happens long after the file was fetched. Whose name wins:
+//
+//   1. one typed in Fitberg (activity_edits.name) — a source never touches it;
+//   2. the source's, when it changed since the last sync — that is a rename;
+//   3. the source's, unchanged, when the activity has no name yet;
+//   4. otherwise whatever is there, so a first sync does not paper over a Strava title
+//      with "Utrecht Run".
+//
+// Rule 2 needs the name the source gave last time, which is what activity_names keeps.
+
+/**
+ * Record what `source` calls one activity now, and apply it by the rules above.
+ *
+ * @returns {boolean} whether activities.name changed
+ */
+export function takeSourceName(db, userId, activity, source, name) {
+  const previous = db.prepare(
+    'SELECT name FROM activity_names WHERE user_id = ? AND dedupe_key = ? AND source = ?',
+  ).get(userId, activity.dedupe_key, source)?.name ?? null;
+
+  if (previous !== name) {
+    db.prepare(`INSERT INTO activity_names (user_id, dedupe_key, source, name, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (user_id, dedupe_key, source) DO UPDATE SET
+        name = excluded.name,
+        updated_at = excluded.updated_at`).run(userId, activity.dedupe_key, source, name, Date.now());
+  }
+
+  if (getEdit(db, userId, activity.dedupe_key)?.name != null) return false;
+  const renamed = previous !== null && previous !== name;
+  if (!renamed && activity.name != null) return false;
+  if (activity.name === name) return false;
+
+  db.prepare('UPDATE activities SET name = ? WHERE id = ?').run(name, activity.id);
+  // Replacing a name that was there is what a reindex would undo; filling an empty one
+  // is not, since the rebuilt activity is empty again and rule 3 fills it.
+  if (activity.name != null) {
+    db.prepare(`UPDATE activity_names SET renamed = 1
+      WHERE user_id = ? AND dedupe_key = ? AND source = ?`).run(userId, activity.dedupe_key, source);
+  }
+  return true;
+}
+
+/**
+ * Re-apply stored source names onto the current activities.
+ *
+ * Called after an import and after a reindex, before applyEdits. A reindex rebuilds each
+ * activity from its file, and for COROS the file has no title to rebuild the name from.
+ * An empty name is filled (rule 3). A name the file did give is only replaced when the
+ * stored name already won a rename once (rule 2, decided when a sync saw it change and
+ * kept in `renamed`); otherwise it stays (rule 4). A typed name is left to applyEdits.
+ *
+ * @returns {{applied: number, missing: number}}
+ */
+export function applySourceNames(db, userId) {
+  const names = db.prepare(
+    'SELECT dedupe_key, name, renamed FROM activity_names WHERE user_id = ? ORDER BY updated_at',
+  ).all(userId);
+  const result = { applied: 0, missing: 0 };
+
+  for (const row of names) {
+    const activity = db.prepare(
+      'SELECT id, name FROM activities WHERE user_id = ? AND dedupe_key = ?',
+    ).get(userId, row.dedupe_key);
+    if (!activity) { result.missing++; continue; }
+    if (getEdit(db, userId, row.dedupe_key)?.name != null) continue;
+    if (activity.name === row.name) continue;
+    if (activity.name != null && !row.renamed) continue;
+
+    db.prepare('UPDATE activities SET name = ? WHERE id = ?').run(row.name, activity.id);
+    result.applied++;
+  }
+
+  return result;
+}

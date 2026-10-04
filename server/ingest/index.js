@@ -11,7 +11,7 @@ import {
   insertActivity, findDuplicate, mergeActivity, writeStreams, writeLaps,
 } from '../db/repo.js';
 import { recomputeAll } from '../metrics/engine.js';
-import { applyEdits } from '../db/edits.js';
+import { applyEdits, applySourceNames } from '../db/edits.js';
 
 // The ingest pipeline.
 //
@@ -266,7 +266,9 @@ export function finishImport(db, userId, report, opts = {}) {
   if (!report.imported && !report.merged) return report;
   try {
     // Before the metrics, not after: a crop changes the activity's load, so applying it
-    // afterwards would leave the fitness curve describing the uncropped ride.
+    // afterwards would leave the fitness curve describing the uncropped ride. Source
+    // names first, so a name typed in Fitberg is the last word.
+    report.sourceNames = applySourceNames(db, userId);
     report.edits = applyEdits(db, userId);
     const result = recomputeAll(db, userId, { onProgress: opts.onProgress });
     report.metrics = {

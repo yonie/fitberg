@@ -3,6 +3,7 @@ import {
   discoverAuth, refreshTokens, CorosAuthError,
 } from './coros-oauth.js';
 import { ingestBuffer, beginImportRecord, finishImportRecord } from '../ingest/index.js';
+import { takeSourceName } from '../db/edits.js';
 import { sniff, KINDS } from '../ingest/sniff.js';
 import { config } from '../lib/config.js';
 
@@ -15,6 +16,9 @@ import { config } from '../lib/config.js';
 //      when we stored it, and by our physical dedupe as a safety net.
 //   4. `downloadActivityFitFiles` for the survivors, minding the 50-file daily
 //      quota, and feed the bytes into the normal ingest pipeline.
+//
+// Between 2 and 3, the names COROS gives activities are taken over: the listing
+// is the only place COROS shows them, and it already arrived.
 //
 // Everything is defensive about shapes: this talks to a third-party server we do
 // not control, and the one certainty about such servers is that they change.
@@ -128,6 +132,7 @@ export async function syncCoros(db, userId, account, {
     alreadyHave: 0,     // already in the library, so never downloaded at all
     unavailable: 0,     // COROS has no file for these; nothing to retry
     deferred: 0,        // listed but not fetched yet — the next sync gets them
+    namesUpdated: 0,    // activities renamed to what COROS calls them
     quotaExhausted: false,
     daysInspected: 0,
     log: [],
@@ -158,6 +163,18 @@ export async function syncCoros(db, userId, account, {
     ? Math.ceil((Date.now() - activities[0].startTime) / DAY_MS)
     : 0;
   const maxStartSeen = activities.reduce((m, a) => Math.max(m, a.startTime), 0);
+
+  // ── 2b. take over COROS's names ──
+  //
+  // For everything already in the library, before the filter below: a rename
+  // in the COROS app changes nothing we would download, so a sync with nothing
+  // new is exactly the one that has to carry it. Fresh activities get theirs
+  // once they are imported.
+  const renamed = takeCorosNames(db, userId, activities);
+  if (renamed) {
+    report.namesUpdated += renamed;
+    note(`${renamed} name(s) updated from COROS`);
+  }
 
   // ── 3. filter to what we do not have ──
   //
@@ -247,6 +264,13 @@ export async function syncCoros(db, userId, account, {
       }
     }
   } finally {
+    // The ones just imported had no row to name when the list came in.
+    const named = takeCorosNames(db, userId, fresh);
+    if (named) {
+      report.namesUpdated += named;
+      note(`${named} new activit${named === 1 ? 'y' : 'ies'} named from COROS`);
+    }
+
     report.deferred = deferred.length;
     const summary = { ...report };
     delete summary.log;
@@ -408,7 +432,9 @@ async function queryWindow(mcp, fromMs, toMs) {
   //      Time Window: startTimestamp=1788003762 | endTimestamp=1788005068
   //      LabelId: 479964017847205988 | SportType: 100
   // The LabelId is what the download tool wants, and startTimestamp (seconds)
-  // tells us whether this record is newer than the last sync. Parsing text
+  // tells us whether this record is newer than the last sync. "Location" is
+  // misnamed: it is the activity's name — "<place> <sport>" by default, and
+  // whatever the user typed once they rename it in the COROS app. Parsing text
   // from a vendor is fragile, so anything without a LabelId is skipped rather
   // than assumed complete.
   //
@@ -432,9 +458,12 @@ async function queryWindow(mcp, fromMs, toMs) {
     const start = Number(startMatch[1]) * 1000;
     // The download tool wants the sport code alongside the labelId.
     const sportMatch = block.match(/SportType:\s*(\d+)/);
+    // No name line is no name, not a broken record.
+    const nameMatch = block.match(/^[ \t]*Location:[ \t]*(.*?)[ \t]*$/m);
     foundRecords.push({
       id: labelMatch[1],
       sportCode: sportMatch ? Number(sportMatch[1]) : null,
+      name: nameMatch?.[1] || null,
       startTime: start,
       raw: { label: block.trim() },
     });
@@ -613,6 +642,48 @@ function knownCorosIds(db, userId) {
 function knownStartSeconds(db, userId) {
   const rows = db.prepare('SELECT start_time FROM activities WHERE user_id = ?').all(userId);
   return new Set(rows.map((r) => Math.floor(Number(r.start_time) / 1000)));
+}
+
+/**
+ * Apply the names COROS listed onto the activities they belong to, by the
+ * rules in takeSourceName. Returns how many activities were renamed.
+ *
+ * An activity is found by its COROS id first — including the legs of a
+ * multisport file, stored as `<id>#<n>` — and otherwise by start second, which
+ * is how a ride imported before COROS was connected is recognised. Two
+ * activities on the same second cannot be told apart, so neither is named.
+ */
+function takeCorosNames(db, userId, activities) {
+  const named = activities.filter((a) => a.name);
+  if (!named.length) return 0;
+
+  const byId = new Map();
+  const bySecond = new Map();
+  for (const row of db.prepare(
+    'SELECT id, name, dedupe_key, source, source_id, start_time FROM activities WHERE user_id = ?',
+  ).all(userId)) {
+    if (row.source === 'coros' && row.source_id) {
+      const id = row.source_id.split('#')[0];
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(row);
+    }
+    const second = Math.floor(Number(row.start_time) / 1000);
+    if (!bySecond.has(second)) bySecond.set(second, []);
+    bySecond.get(second).push(row);
+  }
+
+  let renamed = 0;
+  for (const act of named) {
+    let rows = (act.id && byId.get(act.id)) || [];
+    if (!rows.length) {
+      const sameSecond = bySecond.get(Math.floor(act.startTime / 1000)) || [];
+      if (sameSecond.length === 1) rows = sameSecond;
+    }
+    for (const row of rows) {
+      if (takeSourceName(db, userId, row, 'coros', act.name)) renamed++;
+    }
+  }
+  return renamed;
 }
 
 function attachCorosId(db, userId, activityId, corosId) {

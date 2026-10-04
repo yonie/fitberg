@@ -10,6 +10,8 @@ const { discoverAuth, registerClient, createPkce, buildAuthorizeUrl, exchangeCod
   await import('../server/integrations/coros-oauth.js');
 const { syncCoros, CorosSyncError, needsReconnect } = await import('../server/integrations/coros-sync.js');
 const { ingestBuffer } = await import('../server/ingest/index.js');
+const { reindex } = await import('../server/ingest/reindex.js');
+const { saveEdit, applyEdits } = await import('../server/db/edits.js');
 
 const db = await getDb();
 const USER = db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?)')
@@ -19,4 +21,5 @@ export {
   db, USER, truncateDerived,
   discoverAuth, registerClient, createPkce, buildAuthorizeUrl, exchangeCode,
   chooseRedirectUri, syncCoros, CorosSyncError, needsReconnect, ingestBuffer,
+  reindex, saveEdit, applyEdits,
 };

@@ -230,6 +230,28 @@ CREATE TABLE IF NOT EXISTS activity_edits (
   PRIMARY KEY (user_id, dedupe_key)
 ) WITHOUT ROWID;
 
+-- What a connected platform calls each activity, as of its last sync. COROS keeps the
+-- title out of its FIT files and only shows it in its activity listing, where the user
+-- can rename it at any time; remembering the last name seen is what tells a rename from
+-- a name that merely never changed.
+--
+-- Kept apart from activity_edits on purpose: that table is what you typed, and a name
+-- typed in Fitberg always beats the platform's. Keyed by dedupe key for the same reason,
+-- and likewise NOT derived — reindex cannot recover these from any file.
+--
+-- `renamed` remembers that this name once replaced a name the activity already had: a
+-- rename that won. A reindex rebuilds the name from the file, which would quietly undo
+-- it, and the next sync cannot tell because the platform's name did not change.
+CREATE TABLE IF NOT EXISTS activity_names (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  dedupe_key TEXT    NOT NULL,
+  source     TEXT    NOT NULL,             -- 'coros'
+  name       TEXT    NOT NULL,
+  renamed    INTEGER NOT NULL DEFAULT 0,   -- 1 once it overwrote a non-empty name
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, dedupe_key, source)
+) WITHOUT ROWID;
+
 -- Settings changed in the app rather than in the environment. Not user-scoped: these
 -- describe the instance, and there is one instance.
 CREATE TABLE IF NOT EXISTS app_settings (
