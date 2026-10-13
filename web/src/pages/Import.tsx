@@ -126,7 +126,7 @@ interface CorosStatus {
   lastSync?: {
     found?: number; downloaded?: number; imported?: number; merged?: number;
     duplicates?: number; failed?: number; quotaExhausted?: boolean; quotaUsed?: number;
-    deferred?: number; alreadyHave?: number;
+    deferred?: number; alreadyHave?: number; updated?: number;
   } | null;
   autoSync?: boolean;
 }
@@ -299,6 +299,7 @@ function CorosCard({ onSyncDone }: { onSyncDone: () => void }) {
               Last sync {status.data.lastSyncAt ? relativeTime(status.data.lastSyncAt) : '—'}:
               {' '}{last.imported ?? 0} new, {last.merged ?? 0} merged,
               {' '}{last.duplicates ?? 0} already present
+              {last.updated ? ` · ${last.updated} updated to the full recording` : ''}
               {last.alreadyHave ? ` · ${last.alreadyHave} already in your library` : ''}
               {last.quotaUsed ? ` · ${last.quotaUsed}/50 downloads today` : ''}
               {last.quotaExhausted

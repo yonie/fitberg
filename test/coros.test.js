@@ -24,6 +24,7 @@ process.env.DATA_DIR = DATA_DIR;
 process.env.OLLAMA_ENABLED = '0';
 
 const { syntheticRun, makeFit, BASE_TIME } = await import('./fixtures.js');
+const { parseFit } = await import('../server/parsers/fit.js');
 
 // ─── the fake COROS ───────────────────────────────────────────────────────────
 
@@ -31,7 +32,8 @@ const { syntheticRun, makeFit, BASE_TIME } = await import('./fixtures.js');
  * A fake COROS stack: MCP endpoint + OAuth AS on one origin.
  *
  * @param {object} opts
- * @param {Array}  opts.activities  [{ meta: { id, startTime, name }, fit }] served by querySportRecords
+ * @param {Array}  opts.activities  [{ meta: { id, startTime, name, durationS }, fit }] served by
+ *   querySportRecords; the listed length is `durationS` when given, else the file's own
  * @param {number} [opts.tokenTtlS]  access-token lifetime; short to test refresh
  */
 function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
@@ -188,7 +190,7 @@ function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
           const lines = selected.map((a, i) => [
             `${i + 1}. ${a.meta.sport || 'Outdoor Run'} — ${new Date(a.meta.startTime).toISOString().slice(0, 10)}`,
             `   Location: ${a.meta.name ?? 'Utrecht Run'}`,
-            `   Time Window: startTimestamp=${Math.floor(a.meta.startTime / 1000)} | endTimestamp=${Math.floor(a.meta.startTime / 1000) + 1000}`,
+            `   Time Window: startTimestamp=${Math.floor(a.meta.startTime / 1000)} | endTimestamp=${Math.floor(a.meta.startTime / 1000) + listedLength(a)}`,
             `   LabelId: ${a.meta.id} | SportType: ${a.meta.sportCode || 100}`,
           ].join('\n'));
           return reply({ content: [{ type: 'text', text: lines.join('\n\n') }] });
@@ -225,6 +227,12 @@ function fakeCoros({ activities = [], tokenTtlS = 3600 } = {}) {
       }
       reply({});
     });
+  }
+
+  /** The length COROS lists: what the file says, unless the test says otherwise. */
+  function listedLength(a) {
+    if (Number.isFinite(a.meta.durationS)) return a.meta.durationS;
+    return Math.round(parseFit(a.fit).activities[0]?.elapsedS ?? 0);
   }
 
   return {
@@ -285,6 +293,7 @@ function reset() {
   db.prepare('DELETE FROM integration_accounts').run();
   db.prepare('DELETE FROM activity_names').run();
   db.prepare('DELETE FROM activity_edits').run();
+  db.prepare('DELETE FROM integration_refetches').run();
   const originals = path.join(DATA_DIR, 'originals');
   fs.rmSync(originals, { recursive: true, force: true });
   fs.mkdirSync(originals, { recursive: true });
@@ -775,6 +784,120 @@ test('coros: a rename over a name from the file survives a reindex', async () =>
   saveEdit(db, USER, key, { name: 'Mine' });
   await reindex(db, USER);
   assert.equal(nameAt(BASE_TIME), 'Mine');
+});
+
+/** Every activity of the test user, oldest first. */
+function allActivities() {
+  return db.prepare('SELECT * FROM activities WHERE user_id = ? ORDER BY start_time').all(USER);
+}
+
+test('coros: a file fetched before COROS had all of it is replaced by the full one', async () => {
+  reset();
+  const startMs = BASE_TIME + 10 * 86400000;
+  const full = syntheticRun({ n: 1800, speed: 3.0, startMs });
+  // COROS lists the activity while the watch is still uploading it, and hands out
+  // the first part: here the first 20 seconds of a half-hour session.
+  fake.state.activities = [{
+    meta: { id: 'g1', startTime: startMs, name: 'Utrecht Field Hockey', durationS: 1799 },
+    fit: makeFit(full.slice(0, 20)),
+  }];
+  const account = await connectAccount('Upload Lag Tester');
+  await syncCoros(db, USER, account);
+  const [stub] = allActivities();
+  assert.equal(stub.elapsed_s, 19);
+
+  // What the user attached to the short one has to survive the swap.
+  saveEdit(db, USER, stub.dedupe_key, { notes: 'Competitie, 3-1 gewonnen' });
+  applyEdits(db, USER);
+
+  // The upload finishes; COROS now has the whole file under the same id.
+  fake.state.activities[0].fit = makeFit(full);
+  const report = await syncCoros(db, USER, corosAccount());
+
+  assert.equal(report.updated, 1);
+  assert.equal(report.downloaded, 1);
+  assert.equal(fake.state.fitDownloads, 2);
+  const after = allActivities();
+  assert.equal(after.length, 1, 'replaced, not added next to it');
+  assert.equal(after[0].elapsed_s, 1799);
+  assert.equal(after[0].source_id, 'g1');
+  assert.equal(after[0].name, 'Utrecht Field Hockey');
+  assert.equal(after[0].notes, 'Competitie, 3-1 gewonnen');
+
+  // The short file is gone from the store, so a reindex does not bring it back.
+  const originals = db.prepare("SELECT original_name FROM originals WHERE original_name LIKE 'coros-%'").all();
+  assert.deepEqual(originals.map((o) => o.original_name), ['coros-g1.fit']);
+  const rebuilt = await reindex(db, USER);
+  assert.equal(rebuilt.failed, 0);
+  const reindexed = allActivities();
+  assert.equal(reindexed.length, 1);
+  assert.equal(reindexed[0].elapsed_s, 1799);
+  assert.equal(reindexed[0].name, 'Utrecht Field Hockey');
+  assert.equal(reindexed[0].notes, 'Competitie, 3-1 gewonnen');
+
+  // And a complete activity is left alone from then on.
+  const quiet = await syncCoros(db, USER, corosAccount());
+  assert.equal(quiet.updated, 0);
+  assert.equal(quiet.downloaded, 0);
+  assert.equal(fake.state.fitDownloads, 2);
+});
+
+test('coros: a listing that stays ahead of its file costs one download, not one a day', async () => {
+  reset();
+  const startMs = BASE_TIME + 12 * 86400000;
+  // COROS says an hour; the file it hands out is ten minutes, every time.
+  fake.state.activities = [{
+    meta: { id: 'g2', startTime: startMs, durationS: 3600 },
+    fit: makeFit(syntheticRun({ n: 600, speed: 3.0, startMs })),
+  }];
+  await syncCoros(db, USER, await connectAccount('Stubborn Listing Tester'));
+  assert.equal(fake.state.fitDownloads, 1);
+
+  const second = await syncCoros(db, USER, corosAccount());
+  assert.equal(second.downloaded, 1, 'asked once more');
+  assert.equal(second.updated, 0, 'the same file is not an update');
+  assert.equal(allActivities().length, 1);
+
+  const third = await syncCoros(db, USER, corosAccount());
+  assert.equal(third.downloaded, 0, 'and not again for the same listing');
+  assert.equal(fake.state.fitDownloads, 2);
+
+  // A listing that changes again is worth another look.
+  fake.state.activities[0].meta.durationS = 3700;
+  const fourth = await syncCoros(db, USER, corosAccount());
+  assert.equal(fourth.downloaded, 1);
+  assert.equal(fake.state.fitDownloads, 3);
+});
+
+test('coros: a grown activity deleted in Fitberg stays deleted', async () => {
+  reset();
+  const startMs = BASE_TIME + 14 * 86400000;
+  const full = syntheticRun({ n: 900, speed: 3.0, startMs });
+  fake.state.activities = [{
+    meta: { id: 'g3', startTime: startMs, durationS: 899 },
+    fit: makeFit(full.slice(0, 30)),
+  }];
+  await syncCoros(db, USER, await connectAccount('Deleted Stub Tester'));
+  db.prepare('DELETE FROM activities WHERE user_id = ?').run(USER);
+
+  fake.state.activities[0].fit = makeFit(full);
+  const report = await syncCoros(db, USER, corosAccount());
+  assert.equal(report.downloaded, 0);
+  assert.equal(allActivities().length, 0);
+});
+
+test('coros: a ride imported from a file of your own is never swapped for COROS\'s copy', async () => {
+  reset();
+  const startMs = BASE_TIME + 16 * 86400000;
+  const full = syntheticRun({ n: 900, speed: 3.0, startMs });
+  // The user's own file holds only part of it; COROS lists the whole thing.
+  await ingestBuffer(db, USER, makeFit(full.slice(0, 300)), { filename: 'mine.fit', source: 'file' });
+  fake.state.activities = [{ meta: { id: 'g4', startTime: startMs }, fit: makeFit(full) }];
+
+  const report = await syncCoros(db, USER, await connectAccount('Own File Tester'));
+  assert.equal(report.alreadyHave, 1);
+  assert.equal(report.downloaded, 0);
+  assert.equal(allActivities()[0].elapsed_s, 299);
 });
 
 test('coros: wrong bearer is an auth error, not a crash', async () => {

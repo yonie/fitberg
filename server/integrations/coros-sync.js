@@ -2,7 +2,10 @@ import { createMcpClient, McpError } from './mcp-client.js';
 import {
   discoverAuth, refreshTokens, CorosAuthError,
 } from './coros-oauth.js';
-import { ingestBuffer, beginImportRecord, finishImportRecord } from '../ingest/index.js';
+import {
+  ingestBuffer, replaceActivities, finishImport, beginImportRecord, finishImportRecord,
+} from '../ingest/index.js';
+import { hashBuffer } from '../lib/blobstore.js';
 import { takeSourceName } from '../db/edits.js';
 import { sniff, KINDS } from '../ingest/sniff.js';
 import { config } from '../lib/config.js';
@@ -16,6 +19,10 @@ import { config } from '../lib/config.js';
 //      when we stored it, and by our physical dedupe as a safety net.
 //   4. `downloadActivityFitFiles` for the survivors, minding the 50-file daily
 //      quota, and feed the bytes into the normal ingest pipeline.
+//
+// Step 3 also picks out activities we have whose COROS listing has since grown
+// longer than the file we hold — COROS can hand out a recording before the watch
+// has finished uploading it — and step 4 fetches those again and swaps them in.
 //
 // Between 2 and 3, the names COROS gives activities are taken over: the listing
 // is the only place COROS shows them, and it already arrived.
@@ -37,6 +44,13 @@ const EMPTY_SLICES_TO_STOP = 3;
 /** A hard stop, so a server answering nonsense cannot spin for ever. */
 const MAX_HISTORY_SLICES = 60;
 const DAY_MS = 24 * 3600 * 1000;
+/**
+ * How much longer than the file we hold COROS's listing must say an activity is
+ * before it is fetched again. Checked against a real account's full history:
+ * every recording was within a second of its listing except two, which were
+ * 291 s and 92 minutes short — cut off by an upload COROS had not finished.
+ */
+const GROWTH_TOLERANCE_S = 60;
 
 /** Whether the account has no usable login left and must go through Connect again. */
 export function needsReconnect(account) {
@@ -132,6 +146,7 @@ export async function syncCoros(db, userId, account, {
     alreadyHave: 0,     // already in the library, so never downloaded at all
     unavailable: 0,     // COROS has no file for these; nothing to retry
     deferred: 0,        // listed but not fetched yet — the next sync gets them
+    updated: 0,         // replaced by the longer recording COROS has now
     namesUpdated: 0,    // activities renamed to what COROS calls them
     quotaExhausted: false,
     daysInspected: 0,
@@ -185,16 +200,31 @@ export async function syncCoros(db, userId, account, {
   // whose stored file differs by a byte from COROS's own copy would otherwise
   // land a second time, and a library built by hand would be downloaded all
   // over again at fifty files a day.
+  //
+  // Something we have can still be owed: when COROS lists it as longer than the
+  // file we fetched, that file was taken before the upload was complete.
   const known = knownCorosIds(db, userId);
   const haveStart = knownStartSeconds(db, userId);
+  const held = corosRecordings(db, userId);
+  const refetched = refetchedEnds(db, account);
   const fresh = [];
+  const grown = [];
   for (const act of activities) {
-    if (act.id && known.has(act.id)) continue;
+    if (act.id && known.has(act.id)) {
+      const recording = held.get(act.id);
+      if (recording && hasGrown(act, recording, refetched.get(act.id))) {
+        grown.push({ ...act, replaces: recording });
+      }
+      continue;
+    }
     if (haveStart.has(Math.floor(act.startTime / 1000))) { report.alreadyHave++; continue; }
     fresh.push(act);
   }
   if (report.alreadyHave) {
     note(`${report.alreadyHave} already in the library from an earlier import; not downloaded again`);
+  }
+  if (grown.length) {
+    note(`${grown.length} activit${grown.length === 1 ? 'y is' : 'ies are'} longer on COROS than here; fetching again`);
   }
 
   // Activities we listed but still owe the user. While this is non-empty the
@@ -202,7 +232,7 @@ export async function syncCoros(db, userId, account, {
   // them again rather than stepping over them for good.
   const deferred = [];
 
-  if (!fresh.length) {
+  if (!fresh.length && !grown.length) {
     note(`nothing new (${activities.length} listed, all known or already imported)`);
     return finishSync(db, account, report, { changed: false, maxStartSeen, deferred });
   }
@@ -213,13 +243,15 @@ export async function syncCoros(db, userId, account, {
     source: 'coros', filename: `COROS sync ${new Date().toISOString().slice(0, 10)}`, bytes: null,
   });
 
+  // New activities first: an update to one we already show matters less.
+  const queue = [...fresh, ...grown];
   try {
-    for (let i = 0; i < fresh.length; i++) {
-      const act = fresh[i];
+    for (let i = 0; i < queue.length; i++) {
+      const act = queue[i];
       if (quotaUsed >= DAILY_FIT_QUOTA) {
         report.quotaExhausted = true;
         // Everything still in the list is owed, not skipped.
-        deferred.push(...fresh.slice(i));
+        deferred.push(...queue.slice(i));
         note(`stopped at the daily limit of ${DAILY_FIT_QUOTA} FIT downloads; the rest will come tomorrow`);
         break;
       }
@@ -236,9 +268,24 @@ export async function syncCoros(db, userId, account, {
       }
       // A clean "there is no file" is permanent — a retry gets the same answer,
       // so it must not hold the high-water mark back for ever.
-      if (!bytes) { report.unavailable++; continue; }
+      if (!bytes) {
+        report.unavailable++;
+        if (act.replaces) recordRefetch(db, account, act);
+        continue;
+      }
 
       quotaUsed++;
+      if (act.replaces) {
+        // Whatever comes of it, this listing has had its download.
+        recordRefetch(db, account, act);
+        try {
+          replaceGrown(db, userId, act, bytes, { report, note });
+        } catch (err) {
+          report.failed++;
+          note(`update failed for ${describeActivity(act)}: ${err.message}`);
+        }
+        continue;
+      }
       try {
         const ingest = await ingestBuffer(db, userId, bytes, {
           filename: `coros-${act.id}.fit`,
@@ -265,7 +312,7 @@ export async function syncCoros(db, userId, account, {
     }
   } finally {
     // The ones just imported had no row to name when the list came in.
-    const named = takeCorosNames(db, userId, fresh);
+    const named = takeCorosNames(db, userId, queue);
     if (named) {
       report.namesUpdated += named;
       note(`${named} new activit${named === 1 ? 'y' : 'ies'} named from COROS`);
@@ -277,7 +324,7 @@ export async function syncCoros(db, userId, account, {
     finishImportRecord(db, importId, {
       found: report.found,
       imported: report.imported,
-      merged: report.merged,
+      merged: report.merged + report.updated,
       duplicates: report.duplicates,
       failed: report.failed,
       toJSON: () => ({ source: 'coros', provider: 'coros', ...summary, log: report.log.slice(-50) }),
@@ -285,7 +332,7 @@ export async function syncCoros(db, userId, account, {
   }
 
   return finishSync(db, account, report, {
-    changed: report.imported + report.merged > 0, quotaUsed, maxStartSeen, deferred,
+    changed: report.imported + report.merged + report.updated > 0, quotaUsed, maxStartSeen, deferred,
   });
 }
 
@@ -431,8 +478,9 @@ async function queryWindow(mcp, fromMs, toMs) {
   //      Location: Utrecht Run
   //      Time Window: startTimestamp=1788003762 | endTimestamp=1788005068
   //      LabelId: 479964017847205988 | SportType: 100
-  // The LabelId is what the download tool wants, and startTimestamp (seconds)
-  // tells us whether this record is newer than the last sync. "Location" is
+  // The LabelId is what the download tool wants; the two timestamps (seconds)
+  // place the activity, and their gap is the recording's length, pauses
+  // included — what a FIT file's elapsed time measures too. "Location" is
   // misnamed: it is the activity's name — "<place> <sport>" by default, and
   // whatever the user typed once they rename it in the COROS app. Parsing text
   // from a vendor is fragile, so anything without a LabelId is skipped rather
@@ -456,6 +504,7 @@ async function queryWindow(mcp, fromMs, toMs) {
     if (!labelMatch || !startMatch) continue;
 
     const start = Number(startMatch[1]) * 1000;
+    const endMatch = block.match(/endTimestamp=(\d+)/);
     // The download tool wants the sport code alongside the labelId.
     const sportMatch = block.match(/SportType:\s*(\d+)/);
     // No name line is no name, not a broken record.
@@ -465,6 +514,7 @@ async function queryWindow(mcp, fromMs, toMs) {
       sportCode: sportMatch ? Number(sportMatch[1]) : null,
       name: nameMatch?.[1] || null,
       startTime: start,
+      endTime: endMatch ? Number(endMatch[1]) * 1000 : null,
       raw: { label: block.trim() },
     });
   }
@@ -684,6 +734,95 @@ function takeCorosNames(db, userId, activities) {
     }
   }
   return renamed;
+}
+
+/**
+ * What we hold of each activity fetched from COROS, by COROS id: the rows, and
+ * the span their recording covers.
+ *
+ * Found through the original file the sync stored as `coros-<id>.fit`, not the
+ * row's own source fields, which a reindex rebuilds without the COROS id. Only
+ * files the sync itself fetched count: a ride imported from a file of the
+ * user's own is theirs, and never swapped for COROS's copy.
+ */
+function corosRecordings(db, userId) {
+  const held = new Map();
+  for (const row of db.prepare(`SELECT a.id, a.dedupe_key, a.start_time, a.elapsed_s,
+        a.recording_elapsed_s, a.original_hash, o.original_name
+      FROM activities a JOIN originals o ON o.hash = a.original_hash
+      WHERE a.user_id = ? AND o.original_name LIKE 'coros-%.fit'`).all(userId)) {
+    const id = /^coros-(.+)\.fit$/.exec(row.original_name)?.[1];
+    if (!id) continue;
+    if (!held.has(id)) held.set(id, { rows: [], startMs: Infinity, endMs: -Infinity });
+    const recording = held.get(id);
+    // The whole recording, not what a crop left of it.
+    const lengthS = row.recording_elapsed_s ?? row.elapsed_s ?? 0;
+    recording.rows.push(row);
+    recording.startMs = Math.min(recording.startMs, row.start_time);
+    recording.endMs = Math.max(recording.endMs, row.start_time + lengthS * 1000);
+  }
+  return held;
+}
+
+/**
+ * Whether COROS lists an activity as clearly longer than the recording we hold,
+ * and has not already been asked for it at this length.
+ */
+function hasGrown(act, recording, refetchedEnd) {
+  if (!Number.isFinite(act.endTime) || act.endTime === refetchedEnd) return false;
+  const listedS = (act.endTime - act.startTime) / 1000;
+  const heldS = (recording.endMs - recording.startMs) / 1000;
+  return listedS - heldS > GROWTH_TOLERANCE_S;
+}
+
+/**
+ * Swap a grown activity for the copy COROS has now. The same file as before
+ * means COROS's listing runs ahead of its file, and there is nothing to do.
+ */
+function replaceGrown(db, userId, act, bytes, { report, note }) {
+  report.downloaded++;
+  const { rows, startMs, endMs } = act.replaces;
+  const hash = hashBuffer(bytes);
+  if (rows.some((row) => row.original_hash === hash)) {
+    note(`${describeActivity(act)}: COROS still has the same file`);
+    return;
+  }
+
+  const result = replaceActivities(db, userId, rows, bytes, {
+    filename: `coros-${act.id}.fit`,
+    source: 'coros',
+    retire: [...new Set(rows.map((row) => row.original_hash))],
+  });
+  finishImport(db, userId, result);
+  report.updated++;
+
+  const activityId = result.activityIds[result.activityIds.length - 1] || null;
+  if (activityId) attachCorosId(db, userId, activityId, act.id);
+  const was = formatDuration((endMs - startMs) / 1000);
+  note(`${describeActivity(act)}: replaced the ${was} copy with the full recording`, { activityId });
+}
+
+/** The listing end time each activity was last fetched again for. */
+function refetchedEnds(db, account) {
+  return new Map(db.prepare(
+    'SELECT remote_id, listed_end_ms FROM integration_refetches WHERE account_id = ?',
+  ).all(account.id).map((row) => [row.remote_id, row.listed_end_ms]));
+}
+
+function recordRefetch(db, account, act) {
+  db.prepare(`INSERT INTO integration_refetches (account_id, remote_id, listed_end_ms, fetched_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (account_id, remote_id) DO UPDATE SET
+        listed_end_ms = excluded.listed_end_ms,
+        fetched_at = excluded.fetched_at`).run(account.id, act.id, act.endTime, Date.now());
+}
+
+function formatDuration(seconds) {
+  const s = Math.round(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${rest}` : `${m}:${rest}`;
 }
 
 function attachCorosId(db, userId, activityId, corosId) {

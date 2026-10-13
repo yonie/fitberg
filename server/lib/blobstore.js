@@ -54,6 +54,14 @@ export function putBuffer(buf, { ext = '' } = {}) {
   return { hash, relPath, bytes: buf.length, existed: false };
 }
 
+/**
+ * Delete a stored original. Only for a file another one has superseded — reindex
+ * replays every file in the store, so one left behind would come back.
+ */
+export function removeOriginal(relPath) {
+  fs.rmSync(absPathFor(relPath), { force: true });
+}
+
 export function readOriginal(relPath) {
   return fs.readFileSync(absPathFor(relPath));
 }

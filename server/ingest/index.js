@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { sniff, KINDS } from './sniff.js';
 import { zipEntries, gunzip, readHead } from './archive.js';
-import { putBuffer } from '../lib/blobstore.js';
+import { putBuffer, removeOriginal } from '../lib/blobstore.js';
 import { parseFit } from '../parsers/fit.js';
 import { parseTcx } from '../parsers/tcx.js';
 import { finalizeActivity, streamLength } from '../parsers/canonical.js';
@@ -244,6 +244,94 @@ function storeActivity(db, userId, act, report, { originalHash = null, filename 
     `${act.sport}${act.distanceM ? `, ${(act.distanceM / 1000).toFixed(2)} km` : ''}`,
     { activityId: id });
   return 'inserted';
+}
+
+/** The two leaf formats, by sniffed kind: what parses them and how they are stored. */
+const FORMATS = {
+  [KINDS.FIT]: { kind: 'fit', ext: '.fit', parse: parseFit },
+  [KINDS.TCX]: { kind: 'tcx', ext: '.tcx', parse: parseTcx },
+};
+
+/**
+ * Swap stored activities for a newer copy of the same recording.
+ *
+ * For a source that hands a file out before it is complete. The stored activity is then
+ * the first part of the real one, and dedupe cannot see that: the distance differs, and
+ * with it the dedupe key. Merging would not help either, because a merge never
+ * overwrites the totals a recording with samples already has. So the old rows go, the
+ * new file comes in as if fresh, and what was attached to the old rows by dedupe key —
+ * a typed name, notes, a crop, the source's own name — moves to the new ones.
+ *
+ * `retire` names the originals the new file supersedes. Each is deleted once no activity
+ * refers to it: reindex replays every stored file, and a superseded one would bring the
+ * short version back next to the full one.
+ *
+ * The rows change in one transaction, so a copy that cannot be stored leaves the old
+ * ones as they were. Metrics are left to the caller ({@link finishImport}).
+ *
+ * @returns {ImportReport}
+ */
+export function replaceActivities(db, userId, oldRows, buffer, {
+  filename = 'upload', source = 'file', retire = [],
+} = {}) {
+  const report = new ImportReport(source, filename);
+  const { kind, reason } = sniff(buffer.subarray(0, 4096), filename);
+  const format = FORMATS[kind];
+  if (!format) throw new Error(reason || 'not a FIT or TCX file');
+
+  const { activities, warnings } = format.parse(buffer, { source });
+  if (warnings?.length) report.warnings.push(...warnings.map((w) => `${filename}: ${w}`));
+  const usable = activities.filter((act) => Number.isFinite(act.startTime));
+  if (!usable.length) throw new Error('the new copy holds no activity');
+
+  const stored = putBuffer(buffer, { ext: format.ext });
+  db.transaction(() => {
+    recordOriginal(db, stored, format.kind, source, filename);
+    const remove = db.prepare('DELETE FROM activities WHERE id = ? AND user_id = ?');
+    for (const row of oldRows) remove.run(row.id, userId);
+    for (const act of usable) {
+      report.found++;
+      storeActivity(db, userId, act, report, { originalHash: stored.hash, filename });
+    }
+    carryOver(db, userId, oldRows, report.activityIds);
+  })();
+
+  for (const hash of retire) {
+    if (hash !== stored.hash) retireOriginal(db, hash);
+  }
+  return report;
+}
+
+/**
+ * Move what is keyed to each old activity's dedupe key onto the new activity closest to
+ * it in start time. A key the new activity already has an entry for keeps that entry.
+ */
+function carryOver(db, userId, oldRows, newIds) {
+  if (!newIds.length) return;
+  const placeholders = newIds.map(() => '?').join(', ');
+  const newRows = db.prepare(
+    `SELECT dedupe_key, start_time FROM activities WHERE id IN (${placeholders})`,
+  ).all(...newIds);
+
+  for (const old of oldRows) {
+    const target = newRows.reduce((best, row) =>
+      Math.abs(row.start_time - old.start_time) < Math.abs(best.start_time - old.start_time) ? row : best);
+    if (target.dedupe_key === old.dedupe_key) continue;
+    for (const table of ['activity_edits', 'activity_names']) {
+      db.prepare(`UPDATE OR IGNORE ${table} SET dedupe_key = ? WHERE user_id = ? AND dedupe_key = ?`)
+        .run(target.dedupe_key, userId, old.dedupe_key);
+      db.prepare(`DELETE FROM ${table} WHERE user_id = ? AND dedupe_key = ?`).run(userId, old.dedupe_key);
+    }
+  }
+}
+
+/** Drop a superseded original from the ledger and the store, unless it is still in use. */
+function retireOriginal(db, hash) {
+  if (db.prepare('SELECT 1 FROM activities WHERE original_hash = ? LIMIT 1').get(hash)) return;
+  const row = db.prepare('SELECT rel_path FROM originals WHERE hash = ?').get(hash);
+  if (!row) return;
+  db.prepare('DELETE FROM originals WHERE hash = ?').run(hash);
+  removeOriginal(row.rel_path);
 }
 
 function recordOriginal(db, stored, kind, source, originalName) {

@@ -289,6 +289,18 @@ CREATE TABLE IF NOT EXISTS integration_accounts (
 );
 CREATE INDEX IF NOT EXISTS idx_integrations_user ON integration_accounts(user_id);
 
+-- Activities fetched a second time because the provider's listing outgrew the file we
+-- held: COROS can hand out a recording before the watch has finished uploading it.
+-- Keyed to the end time the listing showed, so each growth costs one download: a file
+-- that comes back no longer is not asked for again until the listing changes.
+CREATE TABLE IF NOT EXISTS integration_refetches (
+  account_id    INTEGER NOT NULL REFERENCES integration_accounts(id) ON DELETE CASCADE,
+  remote_id     TEXT    NOT NULL,
+  listed_end_ms INTEGER NOT NULL,
+  fetched_at    INTEGER NOT NULL,
+  PRIMARY KEY (account_id, remote_id)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS ai_insights (
   id         INTEGER PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
